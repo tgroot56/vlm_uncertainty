@@ -1,12 +1,14 @@
-# get only first 10 datapoints
-def get_data_split(dataset, split: str = "test", num_points: int = 10):
+def get_supervision_samples(mc_dataset, num_samples: int = 10):
     """
-    Get a subset of the dataset split with only the first num_points datapoints.
+    Get the first num_samples from the pre-constructed MC dataset for supervision.
     
     Args:
-        dataset: HuggingFace dataset object
-        split: Dataset split to use ("train", "test", etc.)
-        num_points: Number of datapoints to retrieve
+        mc_dataset: Pre-constructed multiple choice dataset
+        num_samples: Number of samples to retrieve (default: 10)
+        
+    Returns:
+        List of the first num_samples from mc_dataset
     """
-    return dataset[split].select(range(num_points))
+    num_samples = min(num_samples, len(mc_dataset))
+    return mc_dataset[:num_samples]
 

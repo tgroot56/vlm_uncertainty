@@ -9,26 +9,20 @@ def run_imagenet_r_experiment(
     model,
     processor,
     device,
-    test_split,
-    all_class_names: List[str],
-    build_prompt_fn,
+    mc_dataset: List[Dict],
     predict_fn,
-    seed_offset: int = 42,
     save_logits: bool = True,
     progress_interval: int = 100,
 ) -> List[Dict]:
     """
-    Run ImageNet-R experiment on the test split.
+    Run ImageNet-R experiment on a pre-constructed multiple choice dataset.
     
     Args:
         model: Loaded model
         processor: Model processor
         device: torch device
-        test_split: Dataset test split
-        all_class_names: List of all class names
-        build_prompt_fn: Function to build prompts
+        mc_dataset: Pre-constructed dataset with prompts and options
         predict_fn: Function to make predictions
-        seed_offset: Starting seed for reproducibility
         save_logits: Whether to save logits in results
         progress_interval: Print progress every N samples
         
@@ -39,37 +33,30 @@ def run_imagenet_r_experiment(
     correct = 0
     total = 0
     
-    for idx in tqdm(range(len(test_split)), desc="Processing test set"):
-        sample = test_split[idx]
-        
-        # Build prompt with reproducible seed per sample
-        prompt, option_map, gt_letter = build_prompt_fn(
-            sample, all_class_names, seed=seed_offset + idx
-        )
-        
-        # Get prediction and probabilities
+    for mc_sample in tqdm(mc_dataset, desc="Processing test set"):
+        # Get prediction and probabilities using pre-constructed prompt
         pred_letter, option_probs, option_logits, raw_text = predict_fn(
             model=model,
             processor=processor,
             device=device,
-            image=sample["image"],
-            prompt=prompt,
+            image=mc_sample["image"],
+            prompt=mc_sample["prompt"],
         )
         
-        is_correct = (pred_letter == gt_letter)
+        is_correct = (pred_letter == mc_sample["gt_letter"])
         if is_correct:
             correct += 1
         total += 1
         
         # Store result
         result = {
-            "idx": idx,
-            "gt_letter": gt_letter,
+            "idx": mc_sample["idx"],
+            "gt_letter": mc_sample["gt_letter"],
             "pred_letter": pred_letter,
             "is_correct": is_correct,
             "option_probs": option_probs,  # softmax over A/B/C/D
-            "gt_class": sample["class_name"],
-            "option_map": option_map,
+            "gt_class": mc_sample["gt_class"],
+            "option_map": mc_sample["option_map"],
             "raw_text": raw_text,
         }
         
@@ -80,7 +67,7 @@ def run_imagenet_r_experiment(
         results.append(result)
         
         # Print progress
-        if (idx + 1) % progress_interval == 0:
+        if (total) % progress_interval == 0:
             acc = correct / total
             print(f"\nSamples processed: {total}, Accuracy so far: {acc:.4f}")
     

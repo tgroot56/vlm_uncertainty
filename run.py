@@ -1,11 +1,11 @@
 """Main script for running ImageNet-R experiments with LLaVA."""
 
 import argparse
-from data_loader import load_dataset_by_name, build_mc_prompt_imagenet_r
+from data_loader import load_dataset_by_name, construct_or_load_mc_dataset
 from utils.model_loader import load_llava_model
 from utils.inference import predict_letter_and_logits
 from utils.experiment import run_imagenet_r_experiment, save_results
-from generate_dataset import get_data_split
+from generate_dataset import get_supervision_samples
 
 
 def parse_args():
@@ -50,7 +50,13 @@ def parse_args():
     parser.set_defaults(save_logits=True)
 
     parser.add_argument(
-        "--generate|_ds",
+        "--baseline",
+        action="store_true",
+        help="Run baseline inference without any adaptations"
+    )
+
+    parser.add_argument(
+        "--generate_ds",
         action="store_true",
         help="Generate supervision dataset"
     )
@@ -71,12 +77,19 @@ def parse_args():
     
     return parser.parse_args()
 
-def get_baseline_model(model_id: str) -> str: # check later if this works
+def get_baseline_model(model, processor, device, mc_dataset, args):
     """
-    Get the corresponding baseline accuracy and calibration results for a given model.
+    Run baseline inference with the given model on the pre-constructed MC dataset.
     
     Args:
-        model_id: model identifier string
+        model: Loaded model
+        processor: Model processor
+        device: torch device
+        mc_dataset: Pre-constructed multiple choice dataset
+        args: Command line arguments
+        
+    Returns:
+        results: Experiment results
     """
     # Run experiment
     print(f"\nRunning inference...")
@@ -84,33 +97,58 @@ def get_baseline_model(model_id: str) -> str: # check later if this works
         model=model,
         processor=processor,
         device=device,
-        test_split=test_split,
-        all_class_names=all_class_names,
-        build_prompt_fn=build_mc_prompt_imagenet_r,
+        mc_dataset=mc_dataset,
         predict_fn=predict_letter_and_logits,
-        seed_offset=args.seed_offset,
         save_logits=args.save_logits,
         progress_interval=args.progress_interval,
     )
     
-    # Save results
-    additional_info = {
-        "model_id": args.model_id,
-        "dataset": args.dataset,
-        "seed_offset": args.seed_offset,
-    }
-    save_results(results, args.output, additional_info)
+    return results
+
+def generate_supervision_ds(model, processor, device, mc_dataset):
+    """
+    Generate supervision dataset by running forward passes on the first 10 samples.
     
-    print("\nExperiment completed successfully!")
-
-def generate_ds(model_id, dataset):
-    # 1 get data split
-    data_split = get_data_split(model_id, dataset) # select first 10 samples for testing pipeline, replace this later with full dataset
-
-    # Forward pass loop
-    for idx in range(len(data_split)):
-        sample = data_split[idx]
-        # Further processing and saving logic goes here
+    Args:
+        model: Loaded model
+        processor: Model processor
+        device: torch device
+        mc_dataset: Pre-constructed multiple choice dataset
+    """
+    # Get first 10 samples
+    supervision_samples = get_supervision_samples(mc_dataset, num_samples=10)
+    
+    print(f"\n{'='*80}")
+    print(f"Running forward passes on first {len(supervision_samples)} samples")
+    print(f"{'='*80}\n")
+    
+    # Loop through samples and do forward passes
+    for idx, sample in enumerate(supervision_samples):
+        print(f"\n--- Sample {idx + 1} ---")
+        print(f"Ground Truth Class: {sample['gt_class']}")
+        print(f"Ground Truth Letter: {sample['gt_letter']}")
+        
+        # Run forward pass using existing inference logic
+        pred_letter, option_probs, option_logits, raw_text = predict_letter_and_logits(
+            model=model,
+            processor=processor,
+            device=device,
+            image=sample['image'],
+            prompt=sample['prompt'],
+        )
+        
+        # Print results
+        print(f"\nModel Answer: {pred_letter}")
+        print(f"Raw Output: {raw_text}")
+        print(f"Correct: {pred_letter == sample['gt_letter']}")
+        print(f"\nProbabilities:")
+        for letter in sorted(option_probs.keys()):
+            prob = option_probs[letter]
+            class_name = sample['option_map'][letter]
+            marker = "[PREDICTED]" if letter == pred_letter else ""
+            gt_marker = "[GT]" if letter == sample['gt_letter'] else ""
+            print(f"  {letter}: {class_name} - {prob:.4f} {marker} {gt_marker}")
+        print(f"{'-'*80}") 
 
 
 
@@ -125,16 +163,38 @@ def main():
     test_split = dataset["test"]
     all_class_names = sorted(set(test_split["class_name"]))
     print(f"Dataset loaded: {len(test_split)} test samples, {len(all_class_names)} classes")
+
+    # Construct multiple choice dataset with prompts (with caching)
+    print(f"\nConstructing multiple choice dataset...")
+    mc_dataset = construct_or_load_mc_dataset(
+        test_split=test_split,
+        all_class_names=all_class_names,
+        dataset_name=args.dataset,
+        seed_offset=args.seed_offset,
+    )
+    print(f"Multiple choice dataset ready: {len(mc_dataset)} samples")
     
     # Load model
+    print(f"\nLoading model: {args.model_id}")
     model, processor, device = load_llava_model(args.model_id)
     
-    # Get baseline model
-    baseline_model = get_baseline_model(args.model_id)
+    # Get baseline results
+    if args.baseline:
+        results = get_baseline_model(model, processor, device, mc_dataset, args)
+    
+        # Save results
+        additional_info = {
+            "model_id": args.model_id,
+            "dataset": args.dataset,
+            "seed_offset": args.seed_offset,
+        }
+        save_results(results, args.output, additional_info)
 
-    # generate supervision dataset
+        print("\nExperiment completed successfully!")
+
+    # Generate supervision dataset
     if args.generate_ds:
-        generate_ds(baseline_model, dataset)
+        generate_supervision_ds(model, processor, device, mc_dataset)
 
 
 

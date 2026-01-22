@@ -25,14 +25,14 @@ def load_llava_model(
     if torch.cuda.is_available():
         model = LlavaForConditionalGeneration.from_pretrained(
             model_id,
-            torch_dtype=dtype,
+            dtype=dtype,
             device_map="auto",
             low_cpu_mem_usage=True,
         )
     else:
         model = LlavaForConditionalGeneration.from_pretrained(
             model_id,
-            torch_dtype=dtype,
+            dtype=dtype,
             low_cpu_mem_usage=True,
         ).to(device)
 

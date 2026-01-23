@@ -226,6 +226,57 @@ def construct_or_load_mc_dataset(
     return mc_dataset
 
 
+def load_or_construct_mc_dataset_optimized(
+    dataset_name: str,
+    seed_offset: int = 42,
+) -> List[Dict]:
+    """
+    Load MC dataset from cache if available, otherwise load the original dataset
+    and construct it. This optimized version avoids loading the dataset if cache exists.
+    
+    Args:
+        dataset_name: Name of the dataset (for HuggingFace and caching)
+        seed_offset: Starting seed for reproducibility
+        
+    Returns:
+        List of samples with prompts and options pre-generated
+    """
+    # First, check if we have any cached version (try common sizes)
+    # We need to check the cache directory for matching files
+    if os.path.exists(CACHE_DIR):
+        cache_files = [f for f in os.listdir(CACHE_DIR) if f.startswith("mc_dataset_")]
+        for cache_file in cache_files:
+            cache_path = os.path.join(CACHE_DIR, cache_file)
+            try:
+                with open(cache_path, "rb") as f:
+                    cache_data = pickle.load(f)
+                
+                # Check if this cache matches our dataset and seed
+                if (cache_data.get("dataset_name") == dataset_name and
+                    cache_data.get("seed_offset") == seed_offset):
+                    print(f"Found cached MC dataset: {cache_path}")
+                    print(f"Loaded MC dataset from cache: {len(cache_data['mc_dataset'])} samples")
+                    return cache_data["mc_dataset"]
+            except Exception:
+                continue
+    
+    # No cache found - need to load original dataset and construct
+    print(f"No cache found, loading original dataset: {dataset_name}")
+    dataset = load_dataset_by_name(dataset_name)
+    test_split = dataset["test"]
+    all_class_names = sorted(set(test_split["class_name"]))
+    print(f"Dataset loaded: {len(test_split)} test samples, {len(all_class_names)} classes")
+    
+    print("Constructing MC dataset...")
+    mc_dataset = construct_mc_dataset(test_split, all_class_names, seed_offset)
+    
+    # Save to cache
+    save_mc_dataset_cache(mc_dataset, dataset_name, seed_offset)
+    
+    return mc_dataset
+
+
+
 def main():
     """Test data loading."""
     dataset = load_dataset_by_name("axiong/imagenet-r")

@@ -1,11 +1,11 @@
 """Main script for running ImageNet-R experiments with LLaVA."""
 
 import argparse
-from data_loader import load_dataset_by_name, construct_or_load_mc_dataset
+from data_loader import load_dataset_by_name, construct_or_load_mc_dataset, load_or_construct_mc_dataset_optimized
 from utils.model_loader import load_llava_model
-from utils.inference import predict_letter_and_logits
+from utils.inference import predict_letter_and_logits, predict_letter_and_logits_with_features
 from utils.experiment import run_imagenet_r_experiment, save_results
-from generate_dataset import get_supervision_samples
+from generate_dataset import get_supervision_samples, extract_features_from_sample
 
 
 def parse_args():
@@ -108,12 +108,16 @@ def get_baseline_model(model, processor, device, mc_dataset, args):
 def generate_supervision_ds(model, processor, device, mc_dataset):
     """
     Generate supervision dataset by running forward passes on the first 10 samples.
+    Extracts and saves vision features from middle and final layers.
     
     Args:
         model: Loaded model
         processor: Model processor
         device: torch device
         mc_dataset: Pre-constructed multiple choice dataset
+        
+    Returns:
+        List of dicts containing samples with extracted features
     """
     # Get first 10 samples
     supervision_samples = get_supervision_samples(mc_dataset, num_samples=10)
@@ -122,20 +126,63 @@ def generate_supervision_ds(model, processor, device, mc_dataset):
     print(f"Running forward passes on first {len(supervision_samples)} samples")
     print(f"{'='*80}\n")
     
-    # Loop through samples and do forward passes
+    # Store results with features
+    supervision_dataset = []
+    
+    # Loop through samples and do forward passes with feature extraction
     for idx, sample in enumerate(supervision_samples):
         print(f"\n--- Sample {idx + 1} ---")
         print(f"Ground Truth Class: {sample['gt_class']}")
         print(f"Ground Truth Letter: {sample['gt_letter']}")
         
-        # Run forward pass using existing inference logic
-        pred_letter, option_probs, option_logits, raw_text = predict_letter_and_logits(
+        # Run forward pass with vision feature extraction
+        pred_letter, option_probs, option_logits, raw_text, vision_hidden_states = predict_letter_and_logits_with_features(
             model=model,
             processor=processor,
             device=device,
             image=sample['image'],
             prompt=sample['prompt'],
         )
+        
+        # Extract vision features from both middle and final layers
+        middle_layer_features = None
+        final_layer_features = None
+        
+        if vision_hidden_states is not None:
+            num_layers = len(vision_hidden_states)
+            middle_layer_idx = num_layers // 2
+            
+            # Extract from middle layer
+            middle_layer_features = extract_features_from_sample(
+                vision_hidden_states=vision_hidden_states,
+                layer_idx=middle_layer_idx,
+            )
+            print(f"\nMiddle Layer ({middle_layer_idx}) Features Shape: {middle_layer_features.shape}")
+            print(f"Middle Layer Features (first 5 dims): {middle_layer_features[0, :5].tolist()}")
+            
+            # Extract from final layer
+            final_layer_features = extract_features_from_sample(
+                vision_hidden_states=vision_hidden_states,
+                layer_idx=-1,
+            )
+            print(f"Final Layer Features Shape: {final_layer_features.shape}")
+            print(f"Final Layer Features (first 5 dims): {final_layer_features[0, :5].tolist()}")
+        
+        # Store sample with all information including features
+        sample_data = {
+            "idx": sample["idx"],
+            "gt_class": sample["gt_class"],
+            "gt_letter": sample["gt_letter"],
+            "pred_letter": pred_letter,
+            "is_correct": pred_letter == sample["gt_letter"],
+            "option_probs": option_probs,
+            "option_logits": option_logits,
+            "option_map": sample["option_map"],
+            "raw_text": raw_text,
+            "middle_layer_features": middle_layer_features.cpu() if middle_layer_features is not None else None,
+            "final_layer_features": final_layer_features.cpu() if final_layer_features is not None else None,
+        }
+        supervision_dataset.append(sample_data)
         
         # Print results
         print(f"\nModel Answer: {pred_letter}")
@@ -148,7 +195,9 @@ def generate_supervision_ds(model, processor, device, mc_dataset):
             marker = "[PREDICTED]" if letter == pred_letter else ""
             gt_marker = "[GT]" if letter == sample['gt_letter'] else ""
             print(f"  {letter}: {class_name} - {prob:.4f} {marker} {gt_marker}")
-        print(f"{'-'*80}") 
+        print(f"{'-'*80}")
+    
+    return supervision_dataset 
 
 
 
@@ -157,18 +206,9 @@ def main():
     # Parse arguments
     args = parse_args()
     
-    # Load dataset
-    print(f"Loading dataset: {args.dataset}")
-    dataset = load_dataset_by_name(args.dataset)
-    test_split = dataset["test"]
-    all_class_names = sorted(set(test_split["class_name"]))
-    print(f"Dataset loaded: {len(test_split)} test samples, {len(all_class_names)} classes")
-
-    # Construct multiple choice dataset with prompts (with caching)
-    print(f"\nConstructing multiple choice dataset...")
-    mc_dataset = construct_or_load_mc_dataset(
-        test_split=test_split,
-        all_class_names=all_class_names,
+    # Optimized: Check cache first, only load original dataset if needed
+    print(f"Preparing dataset: {args.dataset}")
+    mc_dataset = load_or_construct_mc_dataset_optimized(
         dataset_name=args.dataset,
         seed_offset=args.seed_offset,
     )
@@ -194,7 +234,18 @@ def main():
 
     # Generate supervision dataset
     if args.generate_ds:
-        generate_supervision_ds(model, processor, device, mc_dataset)
+        supervision_dataset = generate_supervision_ds(model, processor, device, mc_dataset)
+        
+        # Save the supervision dataset with features
+        import pickle
+        output_path = "supervision_dataset_with_features.pkl"
+        with open(output_path, "wb") as f:
+            pickle.dump(supervision_dataset, f)
+        print(f"\n{'='*80}")
+        print(f"Supervision dataset saved to: {output_path}")
+        print(f"Total samples: {len(supervision_dataset)}")
+        print(f"Each sample contains: {', '.join(supervision_dataset[0].keys())}")
+        print(f"{'='*80}")
 
 
 

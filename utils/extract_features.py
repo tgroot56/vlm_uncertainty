@@ -57,3 +57,51 @@ def extract_vision_features_mean_pool(
     mean_pooled = patch_tokens.mean(dim=1)
     
     return mean_pooled
+
+
+@torch.no_grad()
+def extract_lm_features_mean_pool(
+    hidden_states: Tuple[torch.Tensor, ...],
+    layer_idx: int,
+    token_start: int,
+    token_end: int,
+) -> torch.Tensor:
+    """
+    Extract mean-pooled features from language model hidden states over a token span.
+    
+    Args:
+        hidden_states: Tuple of hidden state tensors from the language model
+            (obtained via output_hidden_states=True). Each element has shape
+            (batch_size, seq_len, hidden_dim).
+        layer_idx: Integer index of the layer to extract from (0-indexed).
+            For example, use -1 for the final layer, or len(hidden_states)//2
+            for a middle layer.
+        token_start: Starting token index (inclusive) for the span to pool over.
+        token_end: Ending token index (exclusive) for the span to pool over.
+    
+    Returns:
+        Tensor of shape (batch_size, hidden_dim) containing the mean-pooled
+        representations from the specified layer and token span.
+    
+    Example:
+        >>> # Extract features over visual token span
+        >>> outputs = model(input_ids, output_hidden_states=True)
+        >>> hidden_states = outputs.hidden_states
+        >>> features = extract_lm_features_mean_pool(
+        ...     hidden_states, layer_idx=-1, token_start=1, token_end=577
+        ... )
+    """
+    # Extract the specified layer's hidden states
+    # Shape: (batch_size, seq_len, hidden_dim)
+    layer_hidden_states = hidden_states[layer_idx]
+    
+    # Extract the token span
+    # Shape: (batch_size, span_length, hidden_dim)
+    span_tokens = layer_hidden_states[:, token_start:token_end, :]
+    
+    # Mean pool over the token span (dim=1)
+    # Shape: (batch_size, hidden_dim)
+    mean_pooled = span_tokens.mean(dim=1)
+    
+    return mean_pooled
+

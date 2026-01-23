@@ -1,0 +1,26 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=train
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=00:05:00
+#SBATCH --output=slurm_outputs/train_%A.out
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+# Navigate to the project directory
+cd $HOME/vlm_uncertainty/
+
+source activate llava-experiments
+
+#set variables
+
+srun python -m probe.train \
+    --data_path supervision_dataset_with_features.pkl \
+    --features vision_final_layer_features lm_final_answer_features \
+    --output_dir probe_results \
+    --num_epochs 100

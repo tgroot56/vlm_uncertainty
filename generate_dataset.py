@@ -1,7 +1,7 @@
 """Dataset generation utilities for supervision data."""
 
-from utils.extract_features import extract_vision_features_mean_pool
-from typing import List, Dict
+from utils.extract_features import extract_vision_features_mean_pool, extract_lm_features_mean_pool
+from typing import List, Dict, Tuple
 import torch
 
 
@@ -42,5 +42,34 @@ def extract_features_from_sample(
     assert not torch.isinf(features).any(), "Features contain Inf values"
     
     return features
+
+
+def extract_lm_features_from_sample(
+    lm_hidden_states: Tuple[torch.Tensor, ...],
+    layer_idx: int,
+    token_start: int,
+    token_end: int,
+) -> torch.Tensor:
+    """
+    Extract mean-pooled LM features from a sample's hidden states over a token span.
+    
+    Args:
+        lm_hidden_states: Tuple of hidden states from language model
+        layer_idx: Layer index to extract from
+        token_start: Starting token index (inclusive)
+        token_end: Ending token index (exclusive)
+        
+    Returns:
+        Mean-pooled features tensor of shape (batch_size, hidden_dim)
+    """
+    features = extract_lm_features_mean_pool(lm_hidden_states, layer_idx, token_start, token_end)
+    
+    # Validation checks
+    assert features.dim() == 2, f"Expected 2D tensor, got shape {features.shape}"
+    assert not torch.isnan(features).any(), "Features contain NaN values"
+    assert not torch.isinf(features).any(), "Features contain Inf values"
+    
+    return features
+
 
 

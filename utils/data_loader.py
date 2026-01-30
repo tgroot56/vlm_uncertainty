@@ -1,287 +1,287 @@
-"""Data loading and prompt building utilities."""
+"""
+Dataset loading + optional sample preparation + caching.
+
+Some datasets may require additional preparation (e.g. ImageNet-R as 4-way MC).
+Most datasets will just return normalized sample dicts (image, question, gt, etc.).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional
+import hashlib
+import os
+import pickle
+import random
 
 from datasets import load_dataset
-import random
-import pickle
-import os
-import hashlib
-from typing import Dict, List, Tuple, Optional
 
-LETTERS = ["A", "B", "C", "D"]
 CACHE_DIR = "cached_datasets"
+LETTERS = ["A", "B", "C", "D"]
 
 
-def load_dataset_by_name(name: str):
+# ---------------------------------------------------------------------
+# Dataset spec
+# ---------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class DatasetSpec:
     """
-    Load a dataset by name from HuggingFace.
-    
-    Args:
-        name: Dataset name/path
-        
-    Returns:
-        Dataset object
+    Defines how to load and prepare a dataset split into a standardized list of dict samples.
+
+    prepare_split MUST return List[Dict] where each dict is a "prepared sample"
+    (fields depend on dataset, but should at least include 'idx' and any inputs needed later).
     """
-    return load_dataset(name)
+    hf_name: str
+    default_split: str = "test"
+    prepare_split: Callable[[Any, int, Optional[int]], List[Dict]] = None
+    # prepare_split(split_obj, seed_offset, max_samples) -> prepared_samples
 
 
-def build_mc_prompt_imagenet_r(
-    sample: Dict,
+# ---------------------------------------------------------------------
+# Generic helpers
+# ---------------------------------------------------------------------
+
+def load_hf_dataset(hf_name: str):
+    return load_dataset(hf_name)
+
+
+def _cache_key(dataset_id: str, split: str, seed_offset: int, num_samples: int) -> str:
+    s = f"{dataset_id}|{split}|{seed_offset}|{num_samples}"
+    return hashlib.md5(s.encode()).hexdigest()[:10]
+
+
+def _cache_path(dataset_id: str, split: str, seed_offset: int, num_samples: int) -> str:
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    return os.path.join(CACHE_DIR, f"prepared_{_cache_key(dataset_id, split, seed_offset, num_samples)}.pkl")
+
+
+def _load_cache(dataset_id: str, split: str, seed_offset: int, num_samples: int) -> Optional[List[Dict]]:
+    path = _cache_path(dataset_id, split, seed_offset, num_samples)
+    if not os.path.exists(path):
+        return None
+
+    try:
+        with open(path, "rb") as f:
+            payload = pickle.load(f)
+
+        meta = payload.get("meta", {})
+        if (
+            meta.get("dataset_id") == dataset_id
+            and meta.get("split") == split
+            and meta.get("seed_offset") == seed_offset
+            and meta.get("num_samples") == num_samples
+        ):
+            print(f"Loaded prepared dataset from cache: {path}")
+            return payload["samples"]
+
+        print("Cache metadata mismatch; ignoring cache.")
+        return None
+    except Exception as e:
+        print(f"Failed to load cache ({path}): {e}")
+        return None
+
+
+def _save_cache(samples: List[Dict], dataset_id: str, split: str, seed_offset: int) -> str:
+    path = _cache_path(dataset_id, split, seed_offset, len(samples))
+    payload = {
+        "meta": {
+            "dataset_id": dataset_id,
+            "split": split,
+            "seed_offset": seed_offset,
+            "num_samples": len(samples),
+        },
+        "samples": samples,
+    }
+    with open(path, "wb") as f:
+        pickle.dump(payload, f)
+
+    print(f"Saved prepared dataset cache: {path}")
+    return path
+
+
+def _find_matching_cache(dataset_id: str, split: str, seed_offset: int) -> Optional[List[Dict]]:
+    """
+    Optimized cache search: returns the first cache matching dataset_id/split/seed_offset,
+    regardless of num_samples. Useful when you don't want to load HF dataset just to
+    learn split size.
+    """
+    if not os.path.exists(CACHE_DIR):
+        return None
+
+    for fname in os.listdir(CACHE_DIR):
+        if not fname.startswith("prepared_") or not fname.endswith(".pkl"):
+            continue
+        path = os.path.join(CACHE_DIR, fname)
+        try:
+            with open(path, "rb") as f:
+                payload = pickle.load(f)
+            meta = payload.get("meta", {})
+            if (
+                meta.get("dataset_id") == dataset_id
+                and meta.get("split") == split
+                and meta.get("seed_offset") == seed_offset
+            ):
+                print(f"Found matching cache: {path}")
+                return payload["samples"]
+        except Exception:
+            continue
+
+    return None
+
+
+# ---------------------------------------------------------------------
+# ImageNet-R: MC preparation (only dataset that needs it, for now)
+# ---------------------------------------------------------------------
+
+def _build_mc_prompt_4way(
+    question: str,
+    gt_label: str,
     all_class_names: List[str],
-    seed: Optional[int] = None,
-) -> Tuple[str, Dict[str, str], str]:
-    """
-    Build a multiple-choice prompt for ImageNet-R classification.
-    
-    Args:
-        sample: Dataset sample containing 'class_name' and 'image'
-        all_class_names: List of all possible class names
-        seed: Random seed for reproducibility
-        
-    Returns:
-        Tuple of (prompt_text, option_map, ground_truth_letter)
-    """
+    seed: int,
+) -> Dict[str, Any]:
     rng = random.Random(seed)
-    gt_label = sample["class_name"]
-
-    # Sample 3 distractors
     distractors = rng.sample([c for c in all_class_names if c != gt_label], 3)
     options = [gt_label] + distractors
     rng.shuffle(options)
 
-    # Map letters to options
     option_map = {LETTERS[i]: options[i] for i in range(4)}
     gt_letter = next(k for k, v in option_map.items() if v == gt_label)
 
-    # Build prompt
     prompt = (
-        "Which object is shown in the image?\n\n"
+        f"{question}\n\n"
         "Choices:\n"
         + "\n".join(f"{k}. {v}" for k, v in option_map.items())
         + "\n\nAnswer with only A, B, C, or D."
     )
-    
-    return prompt, option_map, gt_letter
 
-
-def construct_mc_dataset(
-    test_split,
-    all_class_names: List[str],
-    seed_offset: int = 42,
-) -> List[Dict]:
-    """
-    Construct a dataset with multiple choice options pre-generated.
-    
-    Args:
-        test_split: Dataset test split
-        all_class_names: List of all class names
-        seed_offset: Starting seed for reproducibility
-        
-    Returns:
-        List of samples with prompts and options pre-generated
-    """
-    mc_dataset = []
-    
-    for idx in range(len(test_split)):
-        sample = test_split[idx]
-        
-        # Build prompt with reproducible seed per sample
-        prompt, option_map, gt_letter = build_mc_prompt_imagenet_r(
-            sample, all_class_names, seed=seed_offset + idx
-        )
-        
-        # Store the sample with pre-generated MC options
-        mc_sample = {
-            "idx": idx,
-            "image": sample["image"],
-            "gt_class": sample["class_name"],
-            "prompt": prompt,
-            "option_map": option_map,
-            "gt_letter": gt_letter,
-        }
-        
-        mc_dataset.append(mc_sample)
-    
-    return mc_dataset
-
-
-def get_cache_filename(dataset_name: str, seed_offset: int, num_samples: int) -> str:
-    """
-    Generate a unique cache filename based on dataset parameters.
-    
-    Args:
-        dataset_name: Name of the dataset
-        seed_offset: Seed offset used for reproducibility
-        num_samples: Number of samples in the dataset
-        
-    Returns:
-        Cache filename
-    """
-    # Create a hash of the parameters for a unique filename
-    cache_key = f"{dataset_name}_{seed_offset}_{num_samples}"
-    cache_hash = hashlib.md5(cache_key.encode()).hexdigest()[:8]
-    return f"mc_dataset_{cache_hash}.pkl"
-
-
-def save_mc_dataset_cache(mc_dataset: List[Dict], dataset_name: str, seed_offset: int) -> str:
-    """
-    Save the constructed MC dataset to cache.
-    
-    Args:
-        mc_dataset: Constructed multiple choice dataset
-        dataset_name: Name of the dataset
-        seed_offset: Seed offset used
-        
-    Returns:
-        Path to the cached file
-    """
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    
-    cache_filename = get_cache_filename(dataset_name, seed_offset, len(mc_dataset))
-    cache_path = os.path.join(CACHE_DIR, cache_filename)
-    
-    # Save metadata along with dataset
-    cache_data = {
-        "mc_dataset": mc_dataset,
-        "dataset_name": dataset_name,
-        "seed_offset": seed_offset,
-        "num_samples": len(mc_dataset),
+    return {
+        "prompt": prompt,
+        "option_map": option_map,
+        "gt_letter": gt_letter,
     }
-    
-    with open(cache_path, "wb") as f:
-        pickle.dump(cache_data, f)
-    
-    print(f"Cached MC dataset saved to: {cache_path}")
-    return cache_path
 
 
-def load_mc_dataset_cache(dataset_name: str, seed_offset: int, num_samples: int) -> Optional[List[Dict]]:
+def prepare_imagenet_r_split(split_obj, seed_offset: int, max_samples: Optional[int]) -> List[Dict]:
     """
-    Load the MC dataset from cache if it exists.
-    
-    Args:
-        dataset_name: Name of the dataset
-        seed_offset: Seed offset to match
-        num_samples: Expected number of samples
-        
-    Returns:
-        Cached MC dataset or None if not found
+    Prepare ImageNet-R as a multiple-choice dataset (A/B/C/D).
+    Keeps logic equivalent to your original code.
     """
-    cache_filename = get_cache_filename(dataset_name, seed_offset, num_samples)
-    cache_path = os.path.join(CACHE_DIR, cache_filename)
-    
-    if not os.path.exists(cache_path):
-        return None
-    
-    try:
-        with open(cache_path, "rb") as f:
-            cache_data = pickle.load(f)
-        
-        # Verify metadata matches
-        if (cache_data["dataset_name"] == dataset_name and
-            cache_data["seed_offset"] == seed_offset and
-            cache_data["num_samples"] == num_samples):
-            print(f"Loaded MC dataset from cache: {cache_path}")
-            return cache_data["mc_dataset"]
-        else:
-            print("Cache metadata mismatch, will rebuild dataset")
-            return None
-    except Exception as e:
-        print(f"Error loading cache: {e}, will rebuild dataset")
-        return None
+    if max_samples is not None:
+        split_obj = split_obj.select(range(min(max_samples, len(split_obj))))
+
+    all_class_names = sorted(set(split_obj["class_name"]))
+
+    samples: List[Dict] = []
+    for idx in range(len(split_obj)):
+        row = split_obj[idx]
+        gt_class = row["class_name"]
+
+        mc = _build_mc_prompt_4way(
+            question="Which object is shown in the image?",
+            gt_label=gt_class,
+            all_class_names=all_class_names,
+            seed=seed_offset + idx,
+        )
+
+        samples.append(
+            {
+                "idx": idx,
+                "image": row["image"],
+                "gt_class": gt_class,
+                # MC-specific fields (only for ImageNet-R)
+                **mc,
+            }
+        )
+
+    return samples
 
 
-def construct_or_load_mc_dataset(
-    test_split,
-    all_class_names: List[str],
-    dataset_name: str,
+# ---------------------------------------------------------------------
+# Default preparation (for "normal" datasets)
+# ---------------------------------------------------------------------
+
+def prepare_default_split(split_obj, seed_offset: int, max_samples: Optional[int]) -> List[Dict]:
+    """
+    Minimal preparation: just wrap raw rows with an idx.
+    Use this for datasets where you don't need custom prompting.
+    """
+    if max_samples is not None:
+        split_obj = split_obj.select(range(min(max_samples, len(split_obj))))
+
+    return [{"idx": i, **split_obj[i]} for i in range(len(split_obj))]
+
+
+# ---------------------------------------------------------------------
+# Dataset registry (add datasets here)
+# ---------------------------------------------------------------------
+
+DATASET_SPECS: Dict[str, DatasetSpec] = {
+    "imagenet-r": DatasetSpec(
+        hf_name="axiong/imagenet-r",
+        default_split="test",
+        prepare_split=prepare_imagenet_r_split,
+    ),
+
+    # Example generic dataset (no MC):
+    # "vqa2": DatasetSpec(
+    #     hf_name="some/vqa2",
+    #     default_split="validation",
+    #     prepare_split=prepare_default_split,
+    # ),
+}
+
+
+def get_dataset_spec(dataset_id: str) -> DatasetSpec:
+    if dataset_id not in DATASET_SPECS:
+        known = ", ".join(sorted(DATASET_SPECS.keys()))
+        raise ValueError(f"Unknown dataset_id '{dataset_id}'. Known: {known}")
+    return DATASET_SPECS[dataset_id]
+
+
+# ---------------------------------------------------------------------
+# Public entrypoint
+# ---------------------------------------------------------------------
+
+def load_dataset_prepared(
+    dataset_id: str,
+    split: Optional[str] = None,
     seed_offset: int = 42,
+    max_samples: Optional[int] = None,
+    use_cache: bool = True,
 ) -> List[Dict]:
     """
-    Construct or load from cache a dataset with multiple choice options.
-    
-    Args:
-        test_split: Dataset test split
-        all_class_names: List of all class names
-        dataset_name: Name of the dataset (for caching)
-        seed_offset: Starting seed for reproducibility
-        
+    Load and prepare a dataset split into a list of standardized dict samples.
+    - ImageNet-R becomes MC (prompt/options/gt_letter).
+    - Other datasets can use prepare_default_split or their own prepare_*.
+
     Returns:
-        List of samples with prompts and options pre-generated
+        List[Dict] prepared samples.
     """
-    num_samples = len(test_split)
-    
-    # Try to load from cache first
-    mc_dataset = load_mc_dataset_cache(dataset_name, seed_offset, num_samples)
-    
-    if mc_dataset is not None:
-        return mc_dataset
-    
-    # Cache miss - construct the dataset
-    print("Cache not found, constructing MC dataset...")
-    mc_dataset = construct_mc_dataset(test_split, all_class_names, seed_offset)
-    
-    # Save to cache
-    save_mc_dataset_cache(mc_dataset, dataset_name, seed_offset)
-    
-    return mc_dataset
+    spec = get_dataset_spec(dataset_id)
+    split = split or spec.default_split
 
+    # Optimized cache check (optional)
+    if use_cache:
+        cached_any = _find_matching_cache(dataset_id, split, seed_offset)
+        if cached_any is not None and (max_samples is None or len(cached_any) >= max_samples):
+            return cached_any if max_samples is None else cached_any[:max_samples]
 
-def load_or_construct_mc_dataset_optimized(
-    dataset_name: str,
-    seed_offset: int = 42,
-) -> List[Dict]:
-    """
-    Load MC dataset from cache if available, otherwise load the original dataset
-    and construct it. This optimized version avoids loading the dataset if cache exists.
-    
-    Args:
-        dataset_name: Name of the dataset (for HuggingFace and caching)
-        seed_offset: Starting seed for reproducibility
-        
-    Returns:
-        List of samples with prompts and options pre-generated
-    """
-    # First, check if we have any cached version (try common sizes)
-    # We need to check the cache directory for matching files
-    if os.path.exists(CACHE_DIR):
-        cache_files = [f for f in os.listdir(CACHE_DIR) if f.startswith("mc_dataset_")]
-        for cache_file in cache_files:
-            cache_path = os.path.join(CACHE_DIR, cache_file)
-            try:
-                with open(cache_path, "rb") as f:
-                    cache_data = pickle.load(f)
-                
-                # Check if this cache matches our dataset and seed
-                if (cache_data.get("dataset_name") == dataset_name and
-                    cache_data.get("seed_offset") == seed_offset):
-                    print(f"Found cached MC dataset: {cache_path}")
-                    print(f"Loaded MC dataset from cache: {len(cache_data['mc_dataset'])} samples")
-                    return cache_data["mc_dataset"]
-            except Exception:
-                continue
-    
-    # No cache found - need to load original dataset and construct
-    print(f"No cache found, loading original dataset: {dataset_name}")
-    dataset = load_dataset_by_name(dataset_name)
-    test_split = dataset["test"]
-    all_class_names = sorted(set(test_split["class_name"]))
-    print(f"Dataset loaded: {len(test_split)} test samples, {len(all_class_names)} classes")
-    
-    print("Constructing MC dataset...")
-    mc_dataset = construct_mc_dataset(test_split, all_class_names, seed_offset)
-    
-    # Save to cache
-    save_mc_dataset_cache(mc_dataset, dataset_name, seed_offset)
-    
-    return mc_dataset
+    ds = load_hf_dataset(spec.hf_name)
+    split_obj = ds[split]
 
+    # Exact cache check (now we know num_samples after optional truncation)
+    # We do truncation inside prepare_split, but need num_samples for exact cache.
+    # Easiest: load exact cache only when max_samples is None.
+    if use_cache and max_samples is None:
+        cached_exact = _load_cache(dataset_id, split, seed_offset, len(split_obj))
+        if cached_exact is not None:
+            return cached_exact
 
+    print(f"Preparing dataset: dataset_id={dataset_id}, split={split}")
+    samples = spec.prepare_split(split_obj, seed_offset=seed_offset, max_samples=max_samples)
 
-def main():
-    """Test data loading."""
-    dataset = load_dataset_by_name("axiong/imagenet-r")
-    print(dataset["test"][0])
+    if use_cache and max_samples is None:
+        _save_cache(samples, dataset_id, split, seed_offset)
 
-
-if __name__ == "__main__":
-    main()
+    return samples

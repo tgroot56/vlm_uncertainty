@@ -18,9 +18,20 @@ cd $HOME/vlm_uncertainty/
 source activate llava-experiments
 
 #set variables
+# Possible features to choose from:
+# vision_middle_layer_features - CLIP vision tower middle layer
+# vision_final_layer_features - CLIP vision tower final layer
+# lm_middle_visual_features - LM middle layer, visual token span
+# lm_final_visual_features - LM final layer, visual token span
+# lm_middle_prompt_features - LM middle layer, prompt token span
+# lm_final_prompt_features - LM final layer, prompt token span
+# lm_middle_answer_features - LM middle layer, answer token span
+# lm_final_answer_features - LM final layer, answer token span
 
-srun python -m probe.train \
+srun python -u -m probe.train \
     --data_path supervision_dataset_with_features.pkl \
-    --features vision_final_layer_features lm_final_answer_features \
-    --output_dir probe_results \
-    --num_epochs 100
+    --features lm_middle_visual_features lm_final_visual_features lm_middle_answer_features lm_final_answer_features \
+    --output_dir probe_results/shuffle_labels \
+    --model_type mlp \
+    --num_epochs 50 \
+    --shuffle_train_labels

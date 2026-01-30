@@ -1,0 +1,31 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=run
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=00:02:00
+#SBATCH --output=slurm_outputs/run_%A.out
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+# Navigate to the project directory
+cd $HOME/vlm_uncertainty/
+
+source activate llava-experiments
+
+#set variables
+MODEL_ID="llava-hf/llava-1.5-7b-hf"
+DATASET="axiong/imagenet-r"
+OUTPUT_PATH="results/experiments/imagenet_r_results.json"
+SEED_OFFSET=42
+
+srun python run.py \
+    --model_id $MODEL_ID \
+    --dataset $DATASET \
+    --output $OUTPUT_PATH \
+    --seed_offset $SEED_OFFSET \
+    --generate_ds

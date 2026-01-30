@@ -123,7 +123,7 @@ def plot_calibration(results: List[Dict], n_bins: int = 10, output_file: str = "
     ax1.plot([0, 1], [0, 1], 'k--', linewidth=2, label='Perfect Calibration')
     
     ax1.set_xlabel('Confidence Bin', fontsize=12, fontweight='bold')
-    ax1.set_ylabel('Accuracy / Confidence', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Accuracy', fontsize=12, fontweight='bold')
     ax1.set_title(f'Calibration Plot (ECE: {ece:.4f})', fontsize=14, fontweight='bold')
     ax1.set_xlim(-0.05, 1.05)
     ax1.set_ylim(0, 1.05)
@@ -197,14 +197,14 @@ def print_statistics(data: Dict):
 def main():
     # Load results
     print("Loading results from imagenet_r_results.pkl...")
-    data = load_results("imagenet_r_results.pkl")
+    data = load_results("results/baselines/llava/imagenet_r_results.pkl")
     
     # Print statistics
     print_statistics(data)
     
     # Create calibration plot
     print("\nGenerating calibration plot...")
-    plot_calibration(data["results"], n_bins=10, output_file="calibration_plot.png")
+    plot_calibration(data["results"], n_bins=10, output_file="results/baselines/llava/calibration_plot.png")
     
     print("\nAnalysis complete!")
 

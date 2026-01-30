@@ -113,36 +113,39 @@ class SupervisionDataset(Dataset):
 def create_dataloaders(
     data_path: str,
     feature_names: List[str],
-    train_split: float = 0.8,
+    train_split: float = 0.7,
+    val_split: float = 0.15,
     batch_size: int = 32,
     normalize: bool = True,
     seed: int = 42,
-) -> Tuple[DataLoader, DataLoader]:
+) -> Tuple[DataLoader, DataLoader, DataLoader, SupervisionDataset]:
     """
-    Create train and validation dataloaders.
+    Create train, validation, and test dataloaders.
     
     Args:
         data_path: Path to the supervision dataset
         feature_names: List of feature names to use
-        train_split: Fraction of data to use for training
+        train_split: Fraction of data to use for training (default: 0.7)
+        val_split: Fraction of data to use for validation (default: 0.15, test gets remaining 0.15)
         batch_size: Batch size for dataloaders
         normalize: Whether to normalize features
         seed: Random seed for reproducibility
         
     Returns:
-        Tuple of (train_loader, val_loader)
+        Tuple of (train_loader, val_loader, test_loader, dataset)
     """
     # Load full dataset
     dataset = SupervisionDataset(data_path, feature_names, normalize=normalize)
     
-    # Split into train and validation
+    # Split into train, validation, and test
     num_samples = len(dataset)
     num_train = int(num_samples * train_split)
-    num_val = num_samples - num_train
+    num_val = int(num_samples * val_split)
+    num_test = num_samples - num_train - num_val
     
     generator = torch.Generator().manual_seed(seed)
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        dataset, [num_train, num_val], generator=generator
+    train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(
+        dataset, [num_train, num_val, num_test], generator=generator
     )
     
     # Create dataloaders
@@ -162,4 +165,12 @@ def create_dataloaders(
         pin_memory=True,
     )
     
-    return train_loader, val_loader, dataset
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=True,
+    )
+    
+    return train_loader, val_loader, test_loader, dataset

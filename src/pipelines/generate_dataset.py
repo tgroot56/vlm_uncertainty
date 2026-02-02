@@ -2,6 +2,7 @@ import argparse
 from utils.model_loader import load_model
 from utils.data_loader import load_dataset_prepared
 from utils.uq_ds_generator import generate_supervised_uq_dataset, SupervisionGenConfig
+from utils.inference import predict_letter_and_logits_with_features
 
 def run_generate_dataset(args):
     """

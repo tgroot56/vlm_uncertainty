@@ -26,6 +26,7 @@ from tqdm.auto import tqdm
 from utils.extract_features import (
     extract_vision_features_mean_pool,
     extract_lm_features_mean_pool,
+    extract_lm_last_k_tokens
 )
 
 # You should import your own function from wherever it lives:
@@ -55,6 +56,12 @@ class SupervisionGenConfig:
     use_lm_prompt_final: bool = True
     use_lm_answer_middle: bool = True
     use_lm_answer_final: bool = True
+    use_lm_visual_middle_lasttoken: bool = True
+    use_lm_visual_final_lasttoken: bool = True
+    use_lm_prompt_middle_lasttoken: bool = True
+    use_lm_prompt_final_lasttoken: bool = True
+    use_lm_answer_middle_lasttoken: bool = True
+    use_lm_answer_final_lasttoken: bool = True
 
     # Layers: if None, "middle" uses n//2, "final" uses -1
     # (kept here for future flexibility)
@@ -93,6 +100,12 @@ def _run_id_from_config(cfg: SupervisionGenConfig) -> str:
             "lm_prompt_final": cfg.use_lm_prompt_final,
             "lm_answer_middle": cfg.use_lm_answer_middle,
             "lm_answer_final": cfg.use_lm_answer_final,
+            "lm_visual_middle_lasttoken": cfg.use_lm_visual_middle_lasttoken,
+            "lm_visual_final_lasttoken": cfg.use_lm_visual_final_lasttoken,
+            "lm_prompt_middle_lasttoken": cfg.use_lm_prompt_middle_lasttoken,
+            "lm_prompt_final_lasttoken": cfg.use_lm_prompt_final_lasttoken,
+            "lm_answer_middle_lasttoken": cfg.use_lm_answer_middle_lasttoken,
+            "lm_answer_final_lasttoken": cfg.use_lm_answer_final_lasttoken,
         },
     }
     s = json.dumps(key, sort_keys=True).encode()
@@ -104,6 +117,41 @@ def _make_output_dir(cfg: SupervisionGenConfig) -> str:
     out_dir = os.path.join(cfg.output_root, cfg.dataset_id, cfg.model_id, f"run_{run_id}")
     os.makedirs(out_dir, exist_ok=True)
     return out_dir
+
+def _load_checkpoint(checkpoint_path: str) -> Optional[Dict[str, Any]]:
+    """Load checkpoint if it exists."""
+    if not os.path.exists(checkpoint_path):
+        return None
+    
+    try:
+        checkpoint = torch.load(checkpoint_path, weights_only=False)
+        print(f"\nLoaded checkpoint from {checkpoint_path}")
+        print(f"  Resuming from sample {len(checkpoint['y_list'])}")
+        return checkpoint
+    except Exception as e:
+        print(f"Warning: Could not load checkpoint: {e}")
+        return None
+
+
+def _save_checkpoint(
+    checkpoint_path: str,
+    X_parts: List[torch.Tensor],
+    y_list: List[float],
+    rows: List[Dict[str, Any]],
+    feature_names: List[str],
+    processed_indices: List[int],
+) -> None:
+    """Save intermediate checkpoint."""
+    torch.save(
+        {
+            "X_parts": X_parts,
+            "y_list": y_list,
+            "rows": rows,
+            "feature_names": feature_names,
+            "processed_indices": processed_indices,
+        },
+        checkpoint_path,
+    )
 
 
 # ---------------------------------------------------------------------
@@ -127,6 +175,30 @@ def _extract_lm_mean_pool(
     _assert_valid_2d(feats, name)
     return feats
 
+def _extract_lm_last_token(
+    lm_hidden_states: Tuple[torch.Tensor, ...],
+    layer_idx: int,
+    token_start: int,
+    token_end: int,
+    name: str,
+) -> torch.Tensor:
+    """
+    Returns (B, H) last-token vector from span [token_start, token_end).
+    """
+    feats_3d = extract_lm_last_k_tokens(
+        hidden_states=lm_hidden_states,
+        layer_idx=layer_idx,
+        token_start=token_start,
+        token_end=token_end,
+        k=1,
+    )  # (B, 1, H)
+
+    assert feats_3d.dim() == 3 and feats_3d.shape[1] == 1, f"{name}: expected (B,1,H), got {tuple(feats_3d.shape)}"
+    feats = feats_3d[:, 0, :]  # (B, H)
+
+    _assert_valid_2d(feats, name)
+    return feats
+
 
 def _get_middle_idx(n_layers: int, forced: Optional[int] = None) -> int:
     if forced is not None:
@@ -146,10 +218,11 @@ def generate_supervised_uq_dataset(
     device: torch.device,
     samples: List[Dict[str, Any]],
     cfg: SupervisionGenConfig,
-    predict_fn,  # pass predict_letter_and_logits_with_features to avoid circular imports
+    predict_fn,
+    checkpoint_every: int = 50,  # Save every N samples
 ) -> Dict[str, Any]:
     """
-    Generate supervised-UQ dataset for correctness prediction.
+    Generate supervised-UQ dataset for correctness prediction with checkpointing.
 
     Returns a dict:
       {
@@ -160,10 +233,11 @@ def generate_supervised_uq_dataset(
         "metadata": Dict
       }
 
-    Also saves to disk under cfg.output_root.
+    Also saves to disk under cfg.output_root with intermediate checkpoints.
     """
 
     out_dir = _make_output_dir(cfg)
+    checkpoint_path = os.path.join(out_dir, "checkpoint.pt")
 
     if cfg.max_samples is not None:
         samples = samples[: cfg.max_samples]
@@ -173,19 +247,39 @@ def generate_supervised_uq_dataset(
     print(f"  model_id:   {cfg.model_id}")
     print(f"  samples:    {len(samples)}")
     print(f"  output:     {out_dir}")
+    print(f"  checkpoint: every {checkpoint_every} samples")
     print(f"  verbose:    {cfg.verbose}")
 
-    X_parts: List[torch.Tensor] = []
-    y_list: List[float] = []
-    rows: List[Dict[str, Any]] = []
+    # Try to load checkpoint
+    checkpoint = _load_checkpoint(checkpoint_path)
+    
+    if checkpoint is not None:
+        X_parts = checkpoint["X_parts"]
+        y_list = checkpoint["y_list"]
+        rows = checkpoint["rows"]
+        feature_names = checkpoint["feature_names"]
+        processed_indices = set(checkpoint["processed_indices"])
+        feature_dim_known = len(feature_names) > 0
+        start_idx = len(y_list)
+        print(f"  Resuming from sample {start_idx}/{len(samples)}")
+    else:
+        X_parts = []
+        y_list = []
+        rows = []
+        feature_names = []
+        processed_indices = set()
+        feature_dim_known = False
+        start_idx = 0
+        print(f"  Starting fresh")
 
-    # We'll determine feature_names dynamically in the same order as concatenation.
-    feature_names: List[str] = []
-    feature_dim_known = False
+    iterator = tqdm(range(len(samples)), desc="Generating", disable=cfg.verbose)
 
-    iterator = tqdm(samples, desc="Generating", disable=cfg.verbose)
-    for sample in iterator:
-        # --- run model inference + hidden state capture ---
+    for sample_idx in iterator:
+        if sample_idx in processed_indices:
+            continue
+
+        sample = samples[sample_idx]
+
         pred_letter, option_probs, option_logits, raw_text, vision_hidden_states, lm_hidden_states, token_spans, answer_hidden_states = predict_fn(
             model=model,
             processor=processor,
@@ -205,6 +299,7 @@ def generate_supervised_uq_dataset(
         if vision_hidden_states is not None and (cfg.use_vision_middle or cfg.use_vision_final):
             n_v = len(vision_hidden_states)
             mid_v = _get_middle_idx(n_v, cfg.force_middle_layer)
+            print("DEBUG: VLM middle layer is layer", mid_v)
 
             if cfg.use_vision_middle:
                 f = _extract_vision_mean_pool(vision_hidden_states, mid_v)
@@ -220,9 +315,10 @@ def generate_supervised_uq_dataset(
         if lm_hidden_states is not None and token_spans:
             n_lm = len(lm_hidden_states)
             mid_lm = _get_middle_idx(n_lm, cfg.force_middle_layer)
+            print("DEBUG: LM middle layer is layer", mid_lm)
 
             v0, v1 = token_spans["visual_start"], token_spans["visual_end"]
-            p0, p1 = token_spans["prompt_start"], token_spans["prompt_end"]
+            p0, p1 = token_spans["text_post_start"], token_spans["text_post_end"]
 
             if cfg.use_lm_visual_middle:
                 f = _extract_lm_mean_pool(lm_hidden_states, mid_lm, v0, v1, name=f"lm_mid_visual_{mid_lm}")
@@ -244,8 +340,37 @@ def generate_supervised_uq_dataset(
                 per_sample_feats.append(f)
                 per_sample_names.append("lm_prompt_mean_layer_-1")
 
+            if cfg.use_lm_visual_middle_lasttoken:
+                f = _extract_lm_last_token(
+                    lm_hidden_states, mid_lm, v0, v1, name=f"lm_mid_visual_lasttok_layer_{mid_lm}"
+                )
+                per_sample_feats.append(f)
+                per_sample_names.append(f"lm_visual_lasttok_layer_{mid_lm}")
+
+            if cfg.use_lm_visual_final_lasttoken:
+                f = _extract_lm_last_token(
+                    lm_hidden_states, -1, v0, v1, name="lm_final_visual_lasttok_-1"
+                )
+                per_sample_feats.append(f)
+                per_sample_names.append("lm_visual_lasttok_layer_-1")
+
+            if cfg.use_lm_prompt_middle_lasttoken:
+                f = _extract_lm_last_token(
+                    lm_hidden_states, mid_lm, p0, p1, name=f"lm_mid_prompt_lasttok_layer_{mid_lm}"
+                )
+                per_sample_feats.append(f)
+                per_sample_names.append(f"lm_prompt_lasttok_layer_{mid_lm}")
+
+            if cfg.use_lm_prompt_final_lasttoken:
+                f = _extract_lm_last_token(
+                    lm_hidden_states, -1, p0, p1, name="lm_final_prompt_lasttok_-1"
+                )
+                per_sample_feats.append(f)
+                per_sample_names.append("lm_prompt_lasttok_layer_-1")
+
+
         # Answer features (using answer_hidden_states + answer span)
-        if answer_hidden_states is not None and token_spans and (cfg.use_lm_answer_middle or cfg.use_lm_answer_final):
+        if answer_hidden_states is not None and token_spans and (cfg.use_lm_answer_middle or cfg.use_lm_answer_final or cfg.use_lm_answer_middle_lasttoken, cfg.use_lm_answer_final_lasttoken):
             n_ans = len(answer_hidden_states)
             mid_ans = _get_middle_idx(n_ans, cfg.force_middle_layer)
 
@@ -261,6 +386,22 @@ def generate_supervised_uq_dataset(
                 per_sample_feats.append(f)
                 per_sample_names.append("lm_answer_mean_layer_-1")
 
+            if cfg.use_lm_answer_middle_lasttoken:
+                f = _extract_lm_last_token(
+                    answer_hidden_states, mid_ans, a0, a1, name=f"lm_mid_answer_lasttok_layer_{mid_ans}"
+                )
+                per_sample_feats.append(f)
+                per_sample_names.append(f"lm_answer_lasttok_layer_{mid_ans}")
+
+            if cfg.use_lm_answer_final_lasttoken:
+                f = _extract_lm_last_token(
+                    answer_hidden_states, -1, a0, a1, name="lm_final_answer_lasttok_-1"
+                )
+                per_sample_feats.append(f)
+                per_sample_names.append("lm_answer_lasttok_layer_-1")
+
+            
+
         if len(per_sample_feats) == 0:
             raise RuntimeError("No features were extracted for this sample. Check cfg feature flags.")
 
@@ -275,13 +416,15 @@ def generate_supervised_uq_dataset(
             # Sanity: ensure consistent feature order across samples
             if per_sample_names != feature_names:
                 raise RuntimeError(
-                    "Feature name/order mismatch across samples.\n"
-                    f"Expected: {feature_names}\nGot:      {per_sample_names}"
+                    "Feature name/order mismatch. This suggests different feature config.\n"
+                    f"Expected: {feature_names}\nGot:      {per_sample_names}\n"
+                    "Delete checkpoint to start fresh with new features."
                 )
 
         X_parts.append(per_x)
+        processed_indices.add(sample_idx)
 
-        # keep small metadata row (don’t store huge tensors here)
+        # keep small metadata row (don't store huge tensors here)
         rows.append(
             {
                 "idx": sample.get("idx"),
@@ -295,6 +438,18 @@ def generate_supervised_uq_dataset(
                 "token_spans": token_spans,
             }
         )
+
+        # Save checkpoint periodically
+        if len(y_list) % checkpoint_every == 0:
+            _save_checkpoint(
+                checkpoint_path,
+                X_parts,
+                y_list,
+                rows,
+                feature_names,
+                list(processed_indices),
+            )
+            iterator.set_postfix({"checkpoint": f"saved at {len(y_list)}"})
 
         if cfg.verbose:
             print("\n--- sample ---")
@@ -316,14 +471,14 @@ def generate_supervised_uq_dataset(
         "label_mean": float(y.mean().item()),
     }
 
-    # Save artifacts
+    # Save final artifacts
     pt_path = os.path.join(out_dir, "supervision_dataset.pt")
     torch.save(
         {
             "X": X,
             "y": y,
             "feature_names": feature_names,
-            "rows": rows,          # can omit later if too large
+            "rows": rows,
             "metadata": metadata,
         },
         pt_path,
@@ -331,6 +486,11 @@ def generate_supervised_uq_dataset(
 
     with open(os.path.join(out_dir, "metadata.json"), "w") as f:
         json.dump(metadata, f, indent=2)
+
+    # Clean up checkpoint after successful completion
+    if os.path.exists(checkpoint_path):
+        os.remove(checkpoint_path)
+        print(f"\nRemoved checkpoint file (processing complete)")
 
     print(f"\nSaved supervised dataset:")
     print(f"  {pt_path}")

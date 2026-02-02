@@ -188,79 +188,54 @@ def predict_letter_and_logits_with_features(
         )
         lm_hidden_states = outputs.hidden_states if hasattr(outputs, 'hidden_states') else None
         
-        # Robustly identify token spans by inspecting the actual model behavior
-        input_ids = inputs['input_ids'][0]  # Shape: (seq_len,)
-        
-        # Step 1: Find the IMAGE_TOKEN_ID in the input sequence
-        # LLaVA uses a special token (typically IMAGE_TOKEN_INDEX = -200) as a placeholder
-        image_token_id = None
+        # --- token spans ---
+        input_ids = inputs["input_ids"][0]
+        s_in = int(input_ids.numel())
+        s_hid = int(lm_hidden_states[0].shape[1])
+
+        # Find image placeholder position
+        image_token_id = getattr(getattr(model, "config", None), "image_token_index", None)
         image_token_position = None
-        
-        # Try to get the image token ID from the model config
-        if hasattr(model, 'config') and hasattr(model.config, 'image_token_index'):
-            image_token_id = model.config.image_token_index
-        
-        # Search for the image token in input_ids
+
         if image_token_id is not None:
-            image_token_mask = (input_ids == image_token_id)
-            if image_token_mask.any():
-                image_token_position = image_token_mask.nonzero(as_tuple=True)[0][0].item()
-        
-        # Step 2: Determine the actual number of visual tokens
-        # This is the number of patch tokens that replace the image token placeholder
-        num_visual_tokens = 576  # Default for ViT-L/14 with 336x336 images (24x24 patches)
-        
-        if hasattr(model, 'config'):
-            # Try various config attributes
-            if hasattr(model.config, 'num_query_tokens'):
-                num_visual_tokens = model.config.num_query_tokens
-            elif hasattr(model.config, 'vision_config') and hasattr(model.config.vision_config, 'image_size'):
-                # Calculate from image size and patch size
-                image_size = model.config.vision_config.image_size
-                patch_size = model.config.vision_config.patch_size if hasattr(model.config.vision_config, 'patch_size') else 14
-                num_patches_per_side = image_size // patch_size
-                num_visual_tokens = num_patches_per_side * num_patches_per_side
-        
-        # Alternatively, check the actual hidden states shape if available
-        if lm_hidden_states is not None and len(lm_hidden_states) > 0:
-            actual_seq_len = lm_hidden_states[0].shape[1]
-            input_seq_len = len(input_ids)
-            # If hidden states are longer than input_ids, the difference is from visual token expansion
-            if actual_seq_len > input_seq_len:
-                num_visual_tokens = actual_seq_len - input_seq_len + 1  # +1 because 1 image token is replaced
-        
-        # Step 3: Compute token spans
-        # In LLaVA, the sequence structure after processing is:
-        # [BOS] [system_tokens] [visual_tokens] [user_prompt_tokens] [assistant_tokens]
-        
-        if image_token_position is not None:
-            # Visual tokens replace the image token placeholder
-            visual_start = image_token_position
-            visual_end = visual_start + num_visual_tokens
-            
-            # Prompt tokens come after visual tokens
-            # Everything after visual tokens until the end
-            prompt_start = visual_end
-            prompt_end = actual_seq_len if lm_hidden_states is not None else len(input_ids) + num_visual_tokens - 1
-        else:
-            # Fallback: assume standard LLaVA 1.5 layout
-            # Visual tokens typically start at position 1 (after BOS)
-            visual_start = 1
-            visual_end = visual_start + num_visual_tokens
-            prompt_start = visual_end
-            prompt_end = len(input_ids) + num_visual_tokens - 1
-        
+            mask = (input_ids == image_token_id)
+            if mask.any():
+                image_token_position = int(mask.nonzero(as_tuple=True)[0][0].item())
+
+        if image_token_position is None:
+            raise RuntimeError(
+                "Could not find image placeholder token in input_ids. "
+                "Span extraction would be unreliable; skipping."
+            )
+
+        # number of visual tokens inserted/replacing the placeholder
+        num_visual_tokens = s_hid - s_in + 1
+        if num_visual_tokens <= 0:
+            raise RuntimeError(
+                f"Non-positive num_visual_tokens={num_visual_tokens} (s_hid={s_hid}, s_in={s_in})."
+            )
+
+        visual_start = image_token_position
+        visual_end = visual_start + num_visual_tokens
+
+        # Text spans (pre and post image block) in hidden-state indexing
+        text_pre_start, text_pre_end = 0, visual_start
+        text_post_start, text_post_end = visual_end, s_hid
+
         token_spans = {
-            'visual_start': visual_start,
-            'visual_end': visual_end,
-            'prompt_start': prompt_start,
-            'prompt_end': prompt_end,
-            'num_visual_tokens': num_visual_tokens,
-            'image_token_id': image_token_id,
-            'image_token_position': image_token_position,
-            'input_seq_len': len(input_ids),
-            'hidden_seq_len': lm_hidden_states[0].shape[1] if lm_hidden_states is not None else None,
+            "visual_start": visual_start,
+            "visual_end": visual_end,
+            "text_pre_start": text_pre_start,
+            "text_pre_end": text_pre_end,
+            "text_post_start": text_post_start,
+            "text_post_end": text_post_end,
+            "num_visual_tokens": num_visual_tokens,
+            "image_token_id": image_token_id,
+            "image_token_position": image_token_position,
+            "input_seq_len": s_in,
+            "hidden_seq_len": s_hid,
         }
+
 
     # Generate 1–3 tokens; ask for scores so we can get logits for the first generated token
     out = model.generate(
@@ -302,27 +277,35 @@ def predict_letter_and_logits_with_features(
 
     # Extract answer hidden states by doing another forward pass with the full sequence
     answer_hidden_states = None
-    answer_start = prompt_len
-    answer_end = answer_start + len(gen_ids[0])
-    
-    # Add answer span to token_spans
-    token_spans['answer_start'] = answer_start
-    token_spans['answer_end'] = answer_end
-    token_spans['answer_length'] = answer_end - answer_start
-    
-    # Forward pass with the complete sequence (input + generated answer)
+
+    gen_len = gen_ids.shape[1]  # number of generated tokens (<= max_new_tokens)
+
+    # IMPORTANT: answer spans must be in HIDDEN-STATE indexing (post visual expansion)
+    prompt_hidden_len = int(lm_hidden_states[0].shape[1])  # s_hid
+    answer_start = prompt_hidden_len
+    answer_end = answer_start + gen_len
+
+    token_spans["answer_start"] = answer_start
+    token_spans["answer_end"] = answer_end
+    token_spans["answer_length"] = answer_end - answer_start
+
     with torch.no_grad():
-        full_sequence = out.sequences  # Shape: (batch_size, prompt_len + generated_len)
-        
-        # Create inputs with the full sequence
+        full_sequence = out.sequences  # [B, prompt_input_len + gen_len] in INPUT_ID space
+
+        # Better attention mask: assume no padding; if padding exists, compute it.
+        if processor.tokenizer.pad_token_id is not None:
+            attention_mask = (full_sequence != processor.tokenizer.pad_token_id).long()
+        else:
+            attention_mask = torch.ones_like(full_sequence)
+
         full_outputs = model(
             input_ids=full_sequence,
-            pixel_values=inputs['pixel_values'] if 'pixel_values' in inputs else None,
-            attention_mask=torch.ones_like(full_sequence),
+            pixel_values=inputs.get("pixel_values", None),
+            attention_mask=attention_mask,
             output_hidden_states=True,
             return_dict=True,
         )
-        answer_hidden_states = full_outputs.hidden_states if hasattr(full_outputs, 'hidden_states') else None
+        answer_hidden_states = full_outputs.hidden_states if hasattr(full_outputs, "hidden_states") else None
 
     return predicted_letter, option_probs, option_logits, raw_text, vision_hidden_states, lm_hidden_states, token_spans, answer_hidden_states
 

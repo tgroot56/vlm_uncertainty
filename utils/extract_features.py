@@ -5,7 +5,7 @@ different components of LLaVA-style models (vision tower, projector, language mo
 """
 
 import torch
-from typing import Tuple, Union
+from typing import Tuple, Union, List
 
 
 @torch.no_grad()
@@ -104,4 +104,32 @@ def extract_lm_features_mean_pool(
     mean_pooled = span_tokens.mean(dim=1)
     
     return mean_pooled
+
+
+@torch.no_grad()
+def extract_lm_last_k_tokens(
+    hidden_states: Tuple[torch.Tensor, ...],
+    layer_idx: int,
+    token_start: int,
+    token_end: int,
+    k: int = 1,
+) -> torch.Tensor:
+    """
+    Extract the last-k token hidden states from a given span [token_start, token_end).
+
+    Returns:
+      Tensor of shape (batch_size, k, hidden_dim)
+
+    If k=1, this is the "final token representation" of the span.
+    """
+    assert token_end > token_start, f"Empty/invalid span: [{token_start}, {token_end})"
+    span_len = token_end - token_start
+    assert k >= 1, "k must be >= 1"
+    k = min(k, span_len)  # clamp if span shorter than k
+
+    layer_h = hidden_states[layer_idx]  # (B, seq_len, H)
+    # last k tokens within the span:
+    start = token_end - k
+    return layer_h[:, start:token_end, :]
+
 

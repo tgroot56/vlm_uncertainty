@@ -1,5 +1,6 @@
 # Cached datasets
 cached_datasets/
+supervised_datasets/
 
 # Python
 __pycache__/
@@ -16,6 +17,12 @@ results/
 slurm_outputs/
 *.pkl
 *.json
+probe_results/linear/
+probe_results/mlp/
+probe_results/lm_middle_final/
+
+# Tests
+quick_tests/
 
 # Environment
 .env

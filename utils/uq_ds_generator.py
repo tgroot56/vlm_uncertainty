@@ -22,12 +22,16 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from tqdm.auto import tqdm
+import torch.nn.functional as F
 
 from utils.extract_features import (
     extract_vision_features_mean_pool,
     extract_lm_features_mean_pool,
     extract_lm_last_k_tokens
 )
+from src.labeling.multiple_choice import score_multiple_choice
+from src.labeling.vqa import score_vqa
+from utils.image_resolver import resolve_image
 
 # You should import your own function from wherever it lives:
 # from uq.models.vlm.infer import predict_letter_and_logits_with_features
@@ -62,6 +66,8 @@ class SupervisionGenConfig:
     use_lm_prompt_final_lasttoken: bool = True
     use_lm_answer_middle_lasttoken: bool = True
     use_lm_answer_final_lasttoken: bool = True
+    use_answer_prob_entropy_stats: bool = True
+
 
     # Layers: if None, "middle" uses n//2, "final" uses -1
     # (kept here for future flexibility)
@@ -106,6 +112,7 @@ def _run_id_from_config(cfg: SupervisionGenConfig) -> str:
             "lm_prompt_final_lasttoken": cfg.use_lm_prompt_final_lasttoken,
             "lm_answer_middle_lasttoken": cfg.use_lm_answer_middle_lasttoken,
             "lm_answer_final_lasttoken": cfg.use_lm_answer_final_lasttoken,
+            "answer_prob_entropy_stats": cfg.use_answer_prob_entropy_stats,
         },
     }
     s = json.dumps(key, sort_keys=True).encode()
@@ -141,17 +148,38 @@ def _save_checkpoint(
     feature_names: List[str],
     processed_indices: List[int],
 ) -> None:
-    """Save intermediate checkpoint."""
-    torch.save(
-        {
-            "X_parts": X_parts,
-            "y_list": y_list,
-            "rows": rows,
-            "feature_names": feature_names,
-            "processed_indices": processed_indices,
-        },
-        checkpoint_path,
-    )
+    """
+    Save intermediate checkpoint ATOMICALLY:
+    - write to checkpoint_path + ".tmp"
+    - fsync
+    - os.replace to checkpoint_path (atomic on most filesystems)
+
+    Guarantee: if saving fails, the previous checkpoint_path is unchanged.
+    """
+    tmp_path = checkpoint_path + ".tmp"
+
+    payload = {
+        "X_parts": X_parts,
+        "y_list": y_list,
+        "rows": rows,
+        "feature_names": feature_names,
+        "processed_indices": processed_indices,
+    }
+
+    # Write to temp file first
+    torch.save(payload, tmp_path)
+
+    # Ensure bytes hit disk before rename (extra safety on network FS)
+    try:
+        with open(tmp_path, "rb") as f:
+            os.fsync(f.fileno())
+    except Exception:
+        # fsync might not be supported in some environments; rename still helps
+        pass
+
+    # Atomic replace: either old checkpoint stays, or new one fully replaces it
+    os.replace(tmp_path, checkpoint_path)
+
 
 
 # ---------------------------------------------------------------------
@@ -198,6 +226,66 @@ def _extract_lm_last_token(
 
     _assert_valid_2d(feats, name)
     return feats
+
+def _extract_gen_prob_entropy_stats(
+    gen_step_logits: torch.Tensor,  # (B, T, V)
+    gen_ids: torch.Tensor,          # (B, T)
+    name_prefix: str,
+) -> Tuple[torch.Tensor, List[str]]:
+    """
+    Compute probability + entropy summary stats over the generated answer tokens.
+
+    Returns:
+      feats: (B, 10) tensor
+      names: 10 feature names (matching order)
+    """
+    assert gen_step_logits.dim() == 3, f"{name_prefix}: expected (B,T,V)"
+    assert gen_ids.dim() == 2, f"{name_prefix}: expected (B,T)"
+    B, T, V = gen_step_logits.shape
+    assert gen_ids.shape[0] == B and gen_ids.shape[1] == T, f"{name_prefix}: shape mismatch"
+
+    probs = F.softmax(gen_step_logits, dim=-1)                   # (B, T, V)
+    token_probs = probs.gather(2, gen_ids.unsqueeze(-1)).squeeze(-1)  # (B, T)
+
+    # Negative probs/log-probs like the paper (monotonic transforms; consistent with their signs)
+    neg_p = -token_probs
+    neg_logp = -torch.log(token_probs + 1e-10)
+
+    # probability stats (6)
+    p_max = neg_p.max(dim=1).values
+    p_min = neg_p.min(dim=1).values
+    p_mean = neg_p.mean(dim=1)
+    p_std = neg_p.std(dim=1) if T > 1 else torch.zeros_like(p_mean)
+
+    logp_mean = neg_logp.mean(dim=1)
+    logp_std = neg_logp.std(dim=1) if T > 1 else torch.zeros_like(logp_mean)
+
+    # entropy stats (4)
+    entropy = -(probs * torch.log(probs + 1e-10)).sum(dim=-1)   # (B, T)
+    e_max = entropy.max(dim=1).values
+    e_min = entropy.min(dim=1).values
+    e_mean = entropy.mean(dim=1)
+    e_std = entropy.std(dim=1) if T > 1 else torch.zeros_like(e_mean)
+
+    feats = torch.stack(
+        [p_max, p_min, p_mean, p_std, logp_mean, logp_std, e_max, e_min, e_mean, e_std],
+        dim=1,
+    )  # (B, 10)
+
+    names = [
+        f"{name_prefix}_negp_max",
+        f"{name_prefix}_negp_min",
+        f"{name_prefix}_negp_mean",
+        f"{name_prefix}_negp_std",
+        f"{name_prefix}_neglogp_mean",
+        f"{name_prefix}_neglogp_std",
+        f"{name_prefix}_entropy_max",
+        f"{name_prefix}_entropy_min",
+        f"{name_prefix}_entropy_mean",
+        f"{name_prefix}_entropy_std",
+    ]
+    return feats, names
+
 
 
 def _get_middle_idx(n_layers: int, forced: Optional[int] = None) -> int:
@@ -262,6 +350,9 @@ def generate_supervised_uq_dataset(
         feature_dim_known = len(feature_names) > 0
         start_idx = len(y_list)
         print(f"  Resuming from sample {start_idx}/{len(samples)}")
+        for r in rows:
+            if "gt_answers" not in r:
+                r["gt_answers"] = None
     else:
         X_parts = []
         y_list = []
@@ -272,24 +363,86 @@ def generate_supervised_uq_dataset(
         start_idx = 0
         print(f"  Starting fresh")
 
-    iterator = tqdm(range(len(samples)), desc="Generating", disable=cfg.verbose)
+    # Update progress bar only every 1% to reduce I/O overhead
+    total_samples = len(samples)
+
+    processed_count = len(processed_indices)
+    last_printed_pct = int(100 * processed_count / total_samples) if total_samples > 0 else 100
+
+    if checkpoint is not None:
+        print(f"[{last_printed_pct:3d}%] Resuming at {processed_count}/{total_samples}")
+    else:
+        print(f"[{last_printed_pct:3d}%] Starting at {processed_count}/{total_samples}")
+
+    # Update at most every ~1% OR every 30s (whichever is less frequent)
+    miniters = max(1, total_samples // 100)   # ~1% steps
+
+    iterator = tqdm(
+        range(total_samples),
+        desc="Generating",
+        total=total_samples,
+        miniters=miniters,
+        mininterval=30.0,
+        smoothing=0.1,
+        dynamic_ncols=True,
+        disable=cfg.verbose,
+        leave=True,
+    )
+
 
     for sample_idx in iterator:
         if sample_idx in processed_indices:
             continue
 
         sample = samples[sample_idx]
+        image = resolve_image(sample)
 
-        pred_letter, option_probs, option_logits, raw_text, vision_hidden_states, lm_hidden_states, token_spans, answer_hidden_states = predict_fn(
+        prediction_output = predict_fn(
             model=model,
             processor=processor,
             device=device,
-            image=sample["image"],
+            image=image,
             prompt=sample["prompt"],
         )
+        
+        if len(prediction_output) == 10:  # Classification (A/B/C/D)
+            (
+                pred_letter,
+                option_probs,
+                option_logits,
+                raw_text,
+                vision_hidden_states,
+                lm_hidden_states,
+                token_spans,
+                answer_hidden_states,
+                gen_ids,
+                gen_step_logits,
+            ) = prediction_output
 
-        is_correct = (pred_letter == sample["gt_letter"])
-        y_list.append(1.0 if is_correct else 0.0)
+            corr = score_multiple_choice(
+                pred_letter=pred_letter,
+                gt_letter=sample.get("gt_letter"),
+                normalize=True,
+            )
+
+        elif len(prediction_output) == 7:  # Open-ended VQA
+            pred_answer, vision_hidden_states, lm_hidden_states, token_spans, answer_hidden_states, gen_ids, gen_step_logits = prediction_output
+
+            corr = score_vqa(
+                pred_answer=pred_answer,
+                gt_answers=sample.get("gt_answers"),
+                gt_answer_single=sample.get("gt_answer")
+            )
+
+            option_probs = None
+            option_logits = None
+            raw_text = pred_answer
+            pred_letter = None
+
+        else:
+            raise ValueError(f"Unexpected predict_fn output length: {len(prediction_output)}")
+
+        y_list.append(float(corr.score))
 
         # --- collect feature tensors for THIS sample (then concat) ---
         per_sample_feats: List[torch.Tensor] = []
@@ -299,7 +452,6 @@ def generate_supervised_uq_dataset(
         if vision_hidden_states is not None and (cfg.use_vision_middle or cfg.use_vision_final):
             n_v = len(vision_hidden_states)
             mid_v = _get_middle_idx(n_v, cfg.force_middle_layer)
-            print("DEBUG: VLM middle layer is layer", mid_v)
 
             if cfg.use_vision_middle:
                 f = _extract_vision_mean_pool(vision_hidden_states, mid_v)
@@ -315,7 +467,6 @@ def generate_supervised_uq_dataset(
         if lm_hidden_states is not None and token_spans:
             n_lm = len(lm_hidden_states)
             mid_lm = _get_middle_idx(n_lm, cfg.force_middle_layer)
-            print("DEBUG: LM middle layer is layer", mid_lm)
 
             v0, v1 = token_spans["visual_start"], token_spans["visual_end"]
             p0, p1 = token_spans["text_post_start"], token_spans["text_post_end"]
@@ -370,7 +521,12 @@ def generate_supervised_uq_dataset(
 
 
         # Answer features (using answer_hidden_states + answer span)
-        if answer_hidden_states is not None and token_spans and (cfg.use_lm_answer_middle or cfg.use_lm_answer_final or cfg.use_lm_answer_middle_lasttoken, cfg.use_lm_answer_final_lasttoken):
+        if answer_hidden_states is not None and token_spans and (
+            cfg.use_lm_answer_middle
+            or cfg.use_lm_answer_final
+            or cfg.use_lm_answer_middle_lasttoken
+            or cfg.use_lm_answer_final_lasttoken
+        ):
             n_ans = len(answer_hidden_states)
             mid_ans = _get_middle_idx(n_ans, cfg.force_middle_layer)
 
@@ -399,6 +555,21 @@ def generate_supervised_uq_dataset(
                 )
                 per_sample_feats.append(f)
                 per_sample_names.append("lm_answer_lasttok_layer_-1")
+            
+        if cfg.use_answer_prob_entropy_stats:
+            if gen_step_logits is None or gen_ids is None or gen_ids.shape[1] == 0:
+                # optionally skip or fill zeros
+                pass
+            else:
+                stats, stat_names = _extract_gen_prob_entropy_stats(
+                    gen_step_logits=gen_step_logits,
+                    gen_ids=gen_ids,
+                    name_prefix="answer_gen",
+                )
+            _assert_valid_2d(stats, "answer_gen_prob_entropy_stats")
+            per_sample_feats.append(stats)
+            per_sample_names.extend(stat_names)
+
 
             
 
@@ -424,13 +595,25 @@ def generate_supervised_uq_dataset(
         X_parts.append(per_x)
         processed_indices.add(sample_idx)
 
+        processed_count += 1
+        pct = int(100 * processed_count / total_samples)
+
+        if pct > last_printed_pct:
+            last_printed_pct = pct
+            tqdm.write(
+                f"[{pct:3d}%] processed={processed_count}/{total_samples} | "
+                f"elapsed={iterator.format_dict['elapsed']:.0f}s | "
+                f"eta={iterator.format_dict.get('remaining', float('nan')):.0f}s"
+            )
+
+
         # keep small metadata row (don't store huge tensors here)
         rows.append(
             {
                 "idx": sample.get("idx"),
                 "gt_letter": sample.get("gt_letter"),
+                "gt_answers": sample.get("gt_answers"),
                 "pred_letter": pred_letter,
-                "is_correct": is_correct,
                 "gt_class": sample.get("gt_class"),
                 "raw_text": raw_text,
                 "option_probs": option_probs,
@@ -441,19 +624,23 @@ def generate_supervised_uq_dataset(
 
         # Save checkpoint periodically
         if len(y_list) % checkpoint_every == 0:
-            _save_checkpoint(
-                checkpoint_path,
-                X_parts,
-                y_list,
-                rows,
-                feature_names,
-                list(processed_indices),
-            )
-            iterator.set_postfix({"checkpoint": f"saved at {len(y_list)}"})
+            try:
+                _save_checkpoint(
+                    checkpoint_path,
+                    X_parts,
+                    y_list,
+                    rows,
+                    feature_names,
+                    list(processed_indices),
+                )
+            except Exception as e:
+                # Don't crash the whole run; keep going.
+                # You can also print free disk space here if you want.
+                print(f"\nWarning: checkpoint save failed at {len(y_list)} samples: {e}")
 
         if cfg.verbose:
             print("\n--- sample ---")
-            print(f"idx: {sample.get('idx')}, gt: {sample.get('gt_letter')} pred: {pred_letter} correct: {is_correct}")
+            print(f"idx: {sample.get('idx')}, gt: {sample.get('gt_letter')} pred: {pred_letter}")
             print(raw_text)
 
     # Stack to [N, D]

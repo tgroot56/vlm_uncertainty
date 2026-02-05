@@ -1,0 +1,80 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=train_eval_probe_singlefeat
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=02:00:00
+#SBATCH --output=slurm_outputs/train_eval_probe_singlefeat_%A.out
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+# Navigate to the project directory
+cd $HOME/vlm_uncertainty/ || exit 1
+
+source activate llava-experiments
+
+# HF caches on scratch
+export HF_HOME=/scratch-shared/$USER/hf_home
+export HF_DATASETS_CACHE=/scratch-shared/$USER/hf_datasets
+export TRANSFORMERS_CACHE=/scratch-shared/$USER/hf_transformers
+
+mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$TRANSFORMERS_CACHE"
+
+# ------------------------------------------------------------------
+# Experiment config
+# ------------------------------------------------------------------
+
+DATA_PATH="outputs/supervised_datasets/imagenet-r/llava-hf/llava-1.5-7b-hf/run_b8e74dc670/supervision_dataset.pt"
+MODEL_TYPE="mlp"
+NUM_EPOCHS=50
+BATCH_SIZE=32
+
+# List of SINGLE features to test (one per run)
+FEATURE_LIST=(
+  vision_mean_layer_12
+  vision_mean_layer_-1
+  lm_visual_mean_layer_16
+  lm_visual_mean_layer_-1
+  lm_prompt_mean_layer_16
+  lm_prompt_mean_layer_-1
+  lm_visual_lasttok_layer_16
+  lm_visual_lasttok_layer_-1
+  lm_prompt_lasttok_layer_16
+  lm_prompt_lasttok_layer_-1
+  lm_answer_mean_layer_16
+  lm_answer_mean_layer_-1
+  lm_answer_lasttok_layer_16
+  lm_answer_lasttok_layer_-1
+  answer_gen_negp_max
+  answer_gen_negp_min
+  answer_gen_negp_mean
+  answer_gen_negp_std
+  answer_gen_neglogp_mean
+  answer_gen_neglogp_std
+  answer_gen_entropy_max
+  answer_gen_entropy_min
+  answer_gen_entropy_mean
+  answer_gen_entropy_std
+)
+
+# ------------------------------------------------------------------
+# Run loop
+# ------------------------------------------------------------------
+
+for FEATURE in "${FEATURE_LIST[@]}"; do
+  echo "============================================================"
+  echo "Running probe for feature: ${FEATURE}"
+  echo "============================================================"
+
+  srun python -m src.cli.train \
+    --data_path "$DATA_PATH" \
+    --features "$FEATURE" \
+    --model_type "$MODEL_TYPE" \
+    --num_epochs "$NUM_EPOCHS" \
+    --batch_size "$BATCH_SIZE"
+
+done

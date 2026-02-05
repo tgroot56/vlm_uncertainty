@@ -133,3 +133,60 @@ def extract_lm_last_k_tokens(
     return layer_h[:, start:token_end, :]
 
 
+def extract_answer_prob_stats(
+    logits: torch.Tensor,   # (B, T, V)
+    tokens: torch.Tensor,   # (B, T)
+) -> torch.Tensor:
+    """
+    Returns (B, 6):
+      [max(-p), min(-p), mean(-p), std(-p),
+       mean(-log p), std(-log p)]
+    """
+    probs = torch.softmax(logits, dim=-1)
+
+    # probability of chosen token at each step
+    chosen_probs = probs.gather(
+        dim=-1, index=tokens.unsqueeze(-1)
+    ).squeeze(-1)  # (B, T)
+
+    neg_p = -chosen_probs
+    neg_log_p = -torch.log(chosen_probs + 1e-10)
+
+    feats = torch.stack(
+        [
+            neg_p.max(dim=1).values,
+            neg_p.min(dim=1).values,
+            neg_p.mean(dim=1),
+            neg_p.std(dim=1),
+            neg_log_p.mean(dim=1),
+            neg_log_p.std(dim=1),
+        ],
+        dim=1,
+    )
+    return feats  # (B, 6)
+
+
+def extract_answer_entropy_stats(
+    logits: torch.Tensor,  # (B, T, V)
+) -> torch.Tensor:
+    """
+    Returns (B, 4):
+      [entropy_max, entropy_min, entropy_mean, entropy_std]
+    """
+    probs = torch.softmax(logits, dim=-1)
+    entropy = -(probs * torch.log(probs + 1e-10)).sum(dim=-1)
+
+    feats = torch.stack(
+        [
+            entropy.max(dim=1).values,
+            entropy.min(dim=1).values,
+            entropy.mean(dim=1),
+            entropy.std(dim=1),
+        ],
+        dim=1,
+    )
+    return feats  # (B, 4)
+
+
+
+

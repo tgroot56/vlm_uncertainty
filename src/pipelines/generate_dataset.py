@@ -2,7 +2,7 @@ import argparse
 from utils.model_loader import load_model
 from utils.data_loader import load_dataset_prepared
 from utils.uq_ds_generator import generate_supervised_uq_dataset, SupervisionGenConfig
-from utils.inference import predict_letter_and_logits_with_features
+from utils.inference import predict_letter_and_logits_with_features, predict_answer_and_features
 
 def run_generate_dataset(args):
     """
@@ -17,6 +17,7 @@ def run_generate_dataset(args):
     output_dir = args.output_dir
     seed = args.seed
     device = args.device
+    verbose = args.verbose
     
     # Rest of your pipeline code here
     print(f"Generating dataset for {dataset_id} using {vlm_id}")
@@ -37,17 +38,28 @@ def run_generate_dataset(args):
         output_root=output_dir,
         seed_offset=seed,
         max_samples=None,  # or args.max_samples if you add this argument
-        verbose=False,
+        verbose=verbose,
     )
 
-    # Step 4: Generate supervised UQ dataset
+    if dataset_id == 'imagenet-r':
+        task_type = 'classification'
+    else:
+        task_type = 'vqa'
+
+    # Select prediction function based on task type
+    if task_type == 'classification':
+        predict_fn = predict_letter_and_logits_with_features
+    else:  # task_type == 'vqa'
+        predict_fn = predict_answer_and_features
+
+
     supervision_dataset = generate_supervised_uq_dataset(
         model=model,
         processor=processor,
         device=device,
         samples=dataset,
         cfg=cfg,
-        predict_fn=predict_letter_and_logits_with_features,
+        predict_fn=predict_fn,
     )
 
 

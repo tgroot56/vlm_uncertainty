@@ -53,6 +53,11 @@ def parse_args():
         default="cuda" if torch.cuda.is_available() else "cpu",
         help="Device to use (e.g. cuda, cuda:0, cpu). Defaults to auto-detect."
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging"
+    )
     # parser.add_argument(
     #     "--batch_size",
     #     type=int,

@@ -2,11 +2,11 @@
 
 #SBATCH --partition=gpu_a100
 #SBATCH --gpus=1
-#SBATCH --job-name=generate_ds
+#SBATCH --job-name=generate_ds_vqa
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=00:10:00
-#SBATCH --output=slurm_outputs/generate_ds_%A.out
+#SBATCH --time=24:00:00
+#SBATCH --output=slurm_outputs/generate_ds_vqa_%A.out
 
 module purge
 module load 2025
@@ -17,9 +17,19 @@ cd $HOME/vlm_uncertainty/
 
 source activate llava-experiments
 
+export HF_HOME=/scratch-shared/$USER/hf_home
+export HF_DATASETS_CACHE=/scratch-shared/$USER/hf_datasets
+export TRANSFORMERS_CACHE=/scratch-shared/$USER/hf_transformers
+
+mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$TRANSFORMERS_CACHE"
+
+export VLM_UQ_PREP_CACHE=/scratch-shared/$USER/vlm_uq_prepared_cache
+mkdir -p "$VLM_UQ_PREP_CACHE"
+
+
 #set variables
 VLM_ID="llava-hf/llava-1.5-7b-hf"
-DATASET="imagenet-r"
+DATASET="vqa-v2"
 OUTPUT_DIR="outputs/supervised_datasets"
 SEED=42
 DEVICE="cuda"
@@ -29,4 +39,4 @@ srun python -u -m src.cli.generate \
     --dataset $DATASET \
     --output_dir $OUTPUT_DIR \
     --seed $SEED \
-    --device $DEVICE
+    --device $DEVICE 

@@ -14,9 +14,13 @@ import os
 import pickle
 import random
 
-from datasets import load_dataset
+from datasets import load_dataset, DownloadConfig
+import aiohttp
 
-CACHE_DIR = "cached_datasets"
+DEFAULT_CACHE_DIR = "cached_datasets"
+CACHE_DIR = os.environ.get("VLM_UQ_PREP_CACHE", DEFAULT_CACHE_DIR)
+os.makedirs(CACHE_DIR, exist_ok=True)
+
 LETTERS = ["A", "B", "C", "D"]
 
 
@@ -43,7 +47,13 @@ class DatasetSpec:
 # ---------------------------------------------------------------------
 
 def load_hf_dataset(hf_name: str):
-    return load_dataset(hf_name)
+    timeout = aiohttp.ClientTimeout(total=60 * 60)  # 1 hour total timeout
+    dl_cfg = DownloadConfig(
+        # these kwargs go to fsspec HTTPFileSystem -> aiohttp.ClientSession
+        storage_options={"client_kwargs": {"timeout": timeout}}
+    )
+    return load_dataset(hf_name, trust_remote_code=True, download_config=dl_cfg)
+
 
 
 def _cache_key(dataset_id: str, split: str, seed_offset: int, num_samples: int) -> str:
@@ -198,6 +208,50 @@ def prepare_imagenet_r_split(split_obj, seed_offset: int, max_samples: Optional[
 
 
 # ---------------------------------------------------------------------
+# VQA-v2 preparation
+# ---------------------------------------------------------------------
+
+from typing import Dict, List, Optional
+from collections import Counter
+
+def prepare_vqa_v2_split(split_obj, seed_offset: int, max_samples: Optional[int]) -> List[Dict]:
+    # Optional: shuffle for a representative subset
+    if max_samples is not None:
+        split_obj = split_obj.shuffle(seed=42 + seed_offset)
+        split_obj = split_obj.select(range(min(max_samples, len(split_obj))))
+
+    samples: List[Dict] = []
+    for idx in range(len(split_obj)):
+        row = split_obj[idx]
+
+        # VQAv2 commonly stores answers as list[dict] with key "answer"
+        raw_answers = row.get("answers", [])
+        if isinstance(raw_answers, list) and raw_answers and isinstance(raw_answers[0], dict):
+            all_answers = [a.get("answer", "") for a in raw_answers]
+        elif isinstance(raw_answers, list):
+            # fallback: list[str]
+            all_answers = [str(a) for a in raw_answers]
+        else:
+            all_answers = []
+
+        # No normalization here (VQAEval will do it)
+        prompt = f"Question: {row.get('question','')}\nProvide a short answer."
+
+        samples.append(
+            {
+                "idx": idx,
+                "question": row.get("question", ""),
+                "prompt": prompt,
+                "gt_answers": all_answers,  # keep all 10
+                "question_id": row.get("question_id"),
+                "image_id": row.get("image_id"),
+                "dataset_id": "vqa-v2",
+            }
+        )
+    return samples
+
+
+# ---------------------------------------------------------------------
 # Default preparation (for "normal" datasets)
 # ---------------------------------------------------------------------
 
@@ -223,12 +277,11 @@ DATASET_SPECS: Dict[str, DatasetSpec] = {
         prepare_split=prepare_imagenet_r_split,
     ),
 
-    # Example generic dataset (no MC):
-    # "vqa2": DatasetSpec(
-    #     hf_name="some/vqa2",
-    #     default_split="validation",
-    #     prepare_split=prepare_default_split,
-    # ),
+    "vqa-v2": DatasetSpec(
+        hf_name="HuggingFaceM4/VQAv2",
+        default_split="validation",
+        prepare_split=prepare_vqa_v2_split,
+    ),
 }
 
 
@@ -278,8 +331,10 @@ def load_dataset_prepared(
         if cached_exact is not None:
             return cached_exact
 
-    print(f"Preparing dataset: dataset_id={dataset_id}, split={split}")
+    print(f"Preparing dataset: dataset_id={dataset_id}, split={split}, num_samples={len(split_obj)}")
+    print("This may take a few minutes for large datasets...")
     samples = spec.prepare_split(split_obj, seed_offset=seed_offset, max_samples=max_samples)
+    print(f"Dataset preparation complete. Processed {len(samples)} samples.")
 
     if use_cache and max_samples is None:
         _save_cache(samples, dataset_id, split, seed_offset)

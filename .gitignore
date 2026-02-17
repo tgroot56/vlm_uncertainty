@@ -17,9 +17,15 @@ results/
 slurm_outputs/
 *.pkl
 *.json
-probe_results/linear/
-probe_results/mlp/
-probe_results/lm_middle_final/
+# Ignore everything inside probe_results
+probe_results/**
+
+# Re-allow directories (so Git can descend into them)
+!probe_results/**/
+
+# Re-allow only results CSV files
+!probe_results/**/results_*.csv
+
 
 # Tests
 quick_tests/

@@ -1,8 +1,14 @@
 import argparse
+
 from utils.model_loader import load_model
-from utils.data_loader import load_dataset_prepared
-from utils.uq_ds_generator import generate_supervised_uq_dataset, SupervisionGenConfig
+# from utils.data_loader import load_dataset_prepared
+from src.data import load_dataset_prepared
+
+# from utils.uq_ds_generator import generate_supervised_uq_dataset, SupervisionGenConfig
+from src.uq_dataset_generation import generate_supervised_uq_dataset, SupervisionGenConfig
+
 from utils.inference import predict_letter_and_logits_with_features, predict_answer_and_features
+# from utils.data_loader.imagenet_r import prepare_imagenet_r_split
 
 def run_generate_dataset(args):
     """
@@ -28,7 +34,37 @@ def run_generate_dataset(args):
     print(f"{model} successfully loaded on {device}")
 
     # Step 2: Load dataset(s)
-    dataset = load_dataset_prepared(dataset_id)
+    # dataset = load_dataset_prepared(dataset_id)
+    # print(f"Dataset {dataset_id} loaded with {len(dataset)} samples")
+    # Step 2: Load dataset(s)
+    dataset_kwargs = {}
+
+    if dataset_id == "imagenet-r":
+        # Defaults replicate old behavior:
+        # k_options=4, random distractors, returns gt_letter
+        dataset_kwargs = {
+            "k_options": args.k_options,  # add CLI arg, or hardcode 4/16
+            "use_clip_hard_negatives": args.clip_negatives,  # add CLI arg
+        }
+
+        # Only pass clip_cfg if clip negatives are enabled
+        if dataset_kwargs["use_clip_hard_negatives"]:
+            from src.data.datasets.imagenet_r import ClipNegSamplerConfig
+            dataset_kwargs["clip_cfg"] = ClipNegSamplerConfig(
+                mode=args.clip_mode,        # "gt_to_text" or "image_to_text"
+                top_pool=args.clip_top_pool,
+                device=device,              # "cuda" or "cpu"
+            )
+
+    dataset = load_dataset_prepared(
+        dataset_id=dataset_id,
+        split=("test" if dataset_id == "imagenet-r" else "validation"),
+        seed_offset=seed,
+        max_samples=None,
+        use_cache=True,
+        dataset_kwargs=dataset_kwargs,
+    )
+
     print(f"Dataset {dataset_id} loaded with {len(dataset)} samples")
 
     # Step 3: Generate supervised UQ dataset

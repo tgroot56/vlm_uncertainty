@@ -5,7 +5,7 @@
 #SBATCH --job-name=train_eval_probe
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=00:05:00
+#SBATCH --time=00:50:00
 #SBATCH --output=slurm_outputs/train_eval_probe_%A.out
 
 module purge
@@ -25,17 +25,22 @@ export TRANSFORMERS_CACHE=/scratch-shared/$USER/hf_transformers
 mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$TRANSFORMERS_CACHE"
 
 #set variables
-DATA_PATH="outputs/supervised_datasets/imagenet-r/llava-hf/llava-1.5-7b-hf/run_b8e74dc670/supervision_dataset.pt"
-FEATURES="answer_gen_neglogp_mean answer_gen_entropy_mean"
-MODEL_TYPE="linear"
+# DATA_PATH="outputs/supervised_datasets/imagenet-r/llava-hf/llava-1.5-7b-hf/run_b8e74dc670/supervision_dataset.pt"
+DATA_PATH="outputs/supervised_datasets/vqa-v2/llava-hf/llava-1.5-7b-hf/run_cc1adbca16/supervision_dataset.pt"
+FEATURES="answer_gen_negp_max lm_answer_lasttok_layer_-1"
+MODEL_TYPE="mlp"
+OUTPUT_DIR="probe_results/vqa-v2"
 HIDDEN_DIMS="256 128"
 NUM_EPOCHS=100
 BATCH_SIZE=32
 
-srun python -m src.cli.train \
+srun python -u -m src.cli.train \
   --data_path $DATA_PATH \
   --features $FEATURES \
   --model_type $MODEL_TYPE \
   --hidden_dims $HIDDEN_DIMS \
   --num_epochs $NUM_EPOCHS \
-  --batch_size $BATCH_SIZE
+  --batch_size $BATCH_SIZE \
+  --output_dir $OUTPUT_DIR \
+  --no_class_weights
+

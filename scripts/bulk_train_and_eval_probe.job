@@ -2,11 +2,11 @@
 
 #SBATCH --partition=gpu_a100
 #SBATCH --gpus=1
-#SBATCH --job-name=train_eval_probe_singlefeat
+#SBATCH --job-name=linear_cw_vqa_train_eval_probe_singlefeat
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=02:00:00
-#SBATCH --output=slurm_outputs/train_eval_probe_singlefeat_%A.out
+#SBATCH --output=slurm_outputs/linear_classweights_vqa_train_eval_probe_singlefeat_%A.out
 
 module purge
 module load 2025
@@ -27,11 +27,14 @@ mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$TRANSFORMERS_CACHE"
 # ------------------------------------------------------------------
 # Experiment config
 # ------------------------------------------------------------------
-
-DATA_PATH="outputs/supervised_datasets/imagenet-r/llava-hf/llava-1.5-7b-hf/run_b8e74dc670/supervision_dataset.pt"
-MODEL_TYPE="mlp"
-NUM_EPOCHS=50
+# DATA_PATH="outputs/supervised_datasets/imagenet-r/llava-hf/llava-1.5-7b-hf/run_b8e74dc670/supervision_dataset.pt"
+DATA_PATH="outputs/supervised_datasets/vqa-v2/llava-hf/llava-1.5-7b-hf/run_cc1adbca16/supervision_dataset.pt"
+MODEL_TYPE="linear"
+NUM_EPOCHS=20
 BATCH_SIZE=32
+# OUTPUT_DIR="probe_results/imagenet-r/16mc-clip_answertotext"
+OUTPUT_DIR="probe_results/vqa-v2/class_weights"
+
 
 # List of SINGLE features to test (one per run)
 FEATURE_LIST=(
@@ -75,6 +78,7 @@ for FEATURE in "${FEATURE_LIST[@]}"; do
     --features "$FEATURE" \
     --model_type "$MODEL_TYPE" \
     --num_epochs "$NUM_EPOCHS" \
-    --batch_size "$BATCH_SIZE"
+    --batch_size "$BATCH_SIZE" \
+    --output_dir "$OUTPUT_DIR" 
 
 done

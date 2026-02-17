@@ -65,6 +65,40 @@ def parse_args():
     #     help="Batch size for VLM inference (keep small for large models)"
     # )
 
+    # imagenet-r specific options
+    parser.add_argument(
+        "--k_options",
+        type=int,
+        default=4,
+        help="(ImageNet-R) Number of multiple-choice options K (default: 4)."
+    )
+
+    parser.add_argument(
+        "--clip_negatives",
+        action="store_true",
+        help="(ImageNet-R) Use CLIP-based hard negatives instead of random distractors."
+    )
+
+    parser.add_argument(
+        "--clip_mode",
+        type=str,
+        default="gt_to_text",
+        choices=["gt_to_text", "image_to_text"],
+        help="(ImageNet-R) CLIP negative sampling mode. "
+            "gt_to_text is cheaper; image_to_text is harder but slower."
+    )
+
+    parser.add_argument(
+        "--clip_top_pool",
+        type=int,
+        default=30,
+        help="(ImageNet-R) Sample distractors from the top-N CLIP-similar labels (default: 30)."
+    )
+
+
+
+
+
     return parser.parse_args()
 
 

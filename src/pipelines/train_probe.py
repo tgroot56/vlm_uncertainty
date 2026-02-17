@@ -5,7 +5,7 @@ from src.probe.train import train_probe
 def run_train_probe(args):
     # Parse device
     device = torch.device(args.device) if args.device else None
-
+    print("Calling train_probe from pipeline")
     # Run training + evaluation
     train_probe(
         data_path=args.data_path,

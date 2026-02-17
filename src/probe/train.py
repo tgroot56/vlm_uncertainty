@@ -40,7 +40,7 @@ def plot_training_history(history: dict, output_dir: str):
 
     plt.figure(figsize=(10, 7))
 
-    # Top: Loss
+    # Top: Loss (always)
     plt.subplot(2, 1, 1)
     plt.plot(epochs, history["train_loss"], label="Train Loss", linewidth=2)
     plt.plot(epochs, history["val_loss"], label="Val Loss", linewidth=2)
@@ -50,22 +50,36 @@ def plot_training_history(history: dict, output_dir: str):
     plt.legend()
     plt.grid(True, alpha=0.3)
 
-    # Bottom: AUROC
-    plt.subplot(2, 1, 2)
-    plt.plot(epochs, history["train_auroc"], label="Train AUROC", linewidth=2)
-    plt.plot(epochs, history["val_auroc"], label="Val AUROC", linewidth=2)
-    plt.xlabel("Epoch")
-    plt.ylabel("AUROC")
-    plt.title("Training and Validation AUROC")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.ylim([0.0, 1.0])
+    # Bottom: AUROC (only if available)
+    if any(v is not None for v in history.get("val_auroc", [])):
+        plt.subplot(2, 1, 2)
+        train_vals = [v if v is not None else float("nan") for v in history["train_auroc"]]
+        val_vals = [v if v is not None else float("nan") for v in history["val_auroc"]]
+
+        plt.plot(epochs, train_vals, label="Train AUROC", linewidth=2)
+        plt.plot(epochs, val_vals, label="Val AUROC", linewidth=2)
+        plt.xlabel("Epoch")
+        plt.ylabel("AUROC")
+        plt.title("Training and Validation AUROC")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.ylim([0.0, 1.0])
+    else:
+        # If AUROC is not applicable, show something informative instead of a blank 2nd panel
+        plt.subplot(2, 1, 2)
+        plt.axis("off")
+        plt.text(
+            0.5, 0.5,
+            "AUROC not computed (continuous targets)",
+            ha="center", va="center"
+        )
 
     plt.tight_layout()
     plot_path = os.path.join(output_dir, "training_curves.png")
     plt.savefig(plot_path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"Training curves saved to: {plot_path}")
+
 
 
 
@@ -224,7 +238,14 @@ def evaluate(
     avg_loss = total_loss / max(len(loader), 1)
 
     ece_dict = compute_ece(preds, labs, num_bins=num_ece_bins)
-    auroc = compute_auroc(preds, labs)
+    # --- Only compute AUROC if targets are binary ---
+    unique_vals = torch.unique(labs)
+    is_binary = torch.all((unique_vals == 0.0) | (unique_vals == 1.0)).item()
+
+    if is_binary and len(unique_vals) == 2:
+        auroc = compute_auroc(preds, labs)
+    else:
+        auroc = None
 
     if save_reliability_path is not None:
         plot_reliability_diagram(
@@ -236,10 +257,13 @@ def evaluate(
     out: Dict[str, Any] = {
         "loss": float(avg_loss),
         "ece": float(ece_dict["ece"]),
-        "auroc": float(auroc),
         "mean_prediction": float(preds.mean().item()),
         "mean_label": float(labs.mean().item()),
     }
+
+    if auroc is not None:
+        out["auroc"] = float(auroc)
+
 
     if return_preds:
         out["predictions"] = preds
@@ -266,7 +290,7 @@ def train_probe(
     seed: int = 42,
     device: Optional[torch.device] = None,
     print_test_predictions: bool = True,
-    use_class_weights: bool = True,
+    use_class_weights: bool = False,
     shuffle_train_labels: bool = False
 ):
     """
@@ -294,7 +318,7 @@ def train_probe(
     torch.manual_seed(seed)
     
     # Create output directory
-    output_dir = make_feature_outdir(model_type, feature_names, base_dir="probe_results")
+    output_dir = make_feature_outdir(model_type, feature_names, base_dir=output_dir)
 
     os.makedirs(output_dir, exist_ok=True)
     
@@ -306,6 +330,8 @@ def train_probe(
     # Create dataloaders
     print(f"\nLoading data from: {data_path}")
     print(f"Selected features: {feature_names}")
+    print(f"selected dataset path: {data_path}")
+    print(f"Saving to {output_dir}")
     train_loader, val_loader, test_loader, dataset = create_dataloaders(
         data_path=data_path,
         feature_names=feature_names,
@@ -404,14 +430,18 @@ def train_probe(
         # Train AUROC only occasionally to save compute (and reuse last value)
         if epoch == 0 or (epoch + 1) % 10 == 0:
             train_metrics = evaluate(model, train_loader, criterion, device)
-            train_auroc = train_metrics["auroc"]
+            train_auroc = train_metrics.get("auroc", None)
         else:
             train_auroc = history["train_auroc"][-1] if len(history["train_auroc"]) > 0 else float("nan")
 
         history["train_loss"].append(float(train_loss))
         history["val_loss"].append(float(val_metrics["loss"]))
-        history["train_auroc"].append(float(train_auroc))
-        history["val_auroc"].append(float(val_metrics["auroc"]))
+        history["train_auroc"].append(
+            float(train_auroc) if train_auroc is not None else None
+        )
+        history["val_auroc"].append(
+            float(val_metrics["auroc"]) if "auroc" in val_metrics else None
+        )
 
         # Print progress occasionally
         if epoch == 0 or (epoch + 1) % 10 == 0:
@@ -420,6 +450,9 @@ def train_probe(
                 f"TrainLoss: {train_loss:.4f} | "
                 f"ValLoss: {val_metrics['loss']:.4f} | "
                 f"ValAUROC: {val_metrics['auroc']:.4f} | "
+                if "auroc" in val_metrics
+                else f"ValAUROC: N/A | "
+
                 f"ValECE: {val_metrics['ece']:.4f}"
             )
 
@@ -428,22 +461,30 @@ def train_probe(
             best_val_loss = float(val_metrics["loss"])
             best_epoch = epoch
 
+            checkpoint_dict = {
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "val_loss": best_val_loss,
+                "val_ece": float(val_metrics["ece"]),
+                "feature_names": feature_names,
+                "input_dim": input_dim,
+                "normalize": normalize,
+                "mean": dataset.mean if normalize else None,
+                "std": dataset.std if normalize else None,
+            }
+
+            # Only store AUROC if it exists
+            if "auroc" in val_metrics:
+                checkpoint_dict["val_auroc"] = float(val_metrics["auroc"])
+            else:
+                checkpoint_dict["val_auroc"] = None
+
             torch.save(
-                {
-                    "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "val_loss": best_val_loss,
-                    "val_auroc": float(val_metrics["auroc"]),
-                    "val_ece": float(val_metrics["ece"]),
-                    "feature_names": feature_names,
-                    "input_dim": input_dim,
-                    "normalize": normalize,
-                    "mean": dataset.mean if normalize else None,
-                    "std": dataset.std if normalize else None,
-                },
+                checkpoint_dict,
                 os.path.join(output_dir, "best_model.pt"),
             )
+
 
     print("=" * 80)
     print(f"Training complete! Best val loss: {best_val_loss:.4f} at epoch {best_epoch+1}")
@@ -467,7 +508,7 @@ def train_probe(
     # metrics_test.json (as requested)
     metrics_out = {
         "test_loss": test_metrics["loss"],
-        "test_auroc": test_metrics["auroc"],
+        "test_auroc": test_metrics.get("auroc", None),
         "test_ece": test_metrics["ece"],
         "best_epoch": best_epoch + 1,
         "best_val_loss": best_val_loss,
@@ -477,7 +518,11 @@ def train_probe(
 
     print("\nTest Set Results:")
     print(f"  Loss (Brier Score): {test_metrics['loss']:.4f}")
-    print(f"  AUROC:              {test_metrics['auroc']:.4f}")
+    if "auroc" in test_metrics:
+        print(f"  AUROC:              {test_metrics['auroc']:.4f}")
+    else:
+        print(f"  AUROC:              N/A (continuous targets)")
+
     print(f"  ECE:                {test_metrics['ece']:.4f}")
     print(f"  Mean label:         {test_metrics['mean_label']:.4f}")
     print(f"  Mean prediction:    {test_metrics['mean_prediction']:.4f}")
@@ -531,7 +576,7 @@ def train_probe(
         "best_epoch": best_epoch + 1,
         "best_val_loss": best_val_loss,
         "test_loss": test_metrics["loss"],
-        "test_auroc": test_metrics["auroc"],
+        "test_auroc": test_metrics.get("auroc", None),
         "test_ece": test_metrics["ece"],
         "dataset_stats": stats,
     }

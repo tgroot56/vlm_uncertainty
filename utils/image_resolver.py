@@ -1,29 +1,44 @@
-import os, json
+# utils/image_resolver.py
+from __future__ import annotations
+
+import os
+import json
+from typing import Any, Dict, Optional
+
 from datasets import load_dataset
+
+try:
+    from PIL import Image
+except Exception:
+    Image = None  # type: ignore
+
+
+# ----------------------------
+# VQA-v2 lazy image index
+# ----------------------------
 
 _VQA_DATASET = None
 _VQA_IMAGE_INDEX = None
 
-def _init_vqa(cache_dir="cached_datasets/vqa_v2"):
+
+def _init_vqa(cache_dir: str = "cached_datasets/vqa_v2", split: str = "validation") -> None:
     global _VQA_DATASET, _VQA_IMAGE_INDEX
     if _VQA_DATASET is not None:
         return
 
     os.makedirs(cache_dir, exist_ok=True)
-    index_path = os.path.join(cache_dir, "image_id_to_idx.json")
+    index_path = os.path.join(cache_dir, f"image_id_to_idx_{split}.json")
 
     _VQA_DATASET = load_dataset(
         "HuggingFaceM4/VQAv2",
-        split="validation",
+        split=split,
         trust_remote_code=True,
     )
 
     if os.path.exists(index_path):
         with open(index_path, "r") as f:
-            # keys may load as strings; normalize later
-            _VQA_IMAGE_INDEX = json.load(f)
-            # convert keys back to int when possible
-            _VQA_IMAGE_INDEX = {int(k) if k.isdigit() else k: v for k, v in _VQA_IMAGE_INDEX.items()}
+            idx_map = json.load(f)
+        _VQA_IMAGE_INDEX = {int(k) if isinstance(k, str) and k.isdigit() else k: v for k, v in idx_map.items()}
     else:
         image_ids = _VQA_DATASET["image_id"]
         idx_map = {}
@@ -33,12 +48,9 @@ def _init_vqa(cache_dir="cached_datasets/vqa_v2"):
         with open(index_path, "w") as f:
             json.dump({str(k): int(v) for k, v in idx_map.items()}, f)
 
-def resolve_image(sample):
+
+def _resolve_vqa_image(sample: Dict[str, Any]) -> Any:
     global _VQA_DATASET, _VQA_IMAGE_INDEX
-
-    if sample.get("dataset_id") != "vqa-v2":
-        raise ValueError(f"Cannot resolve image for sample: {sample.keys()}")
-
     _init_vqa()
 
     image_id = sample["image_id"]
@@ -52,7 +64,38 @@ def resolve_image(sample):
             alt = _VQA_IMAGE_INDEX.get(str(image_id))
 
         if alt is None:
-            raise ValueError(f"Image ID {image_id} not found in dataset")
+            raise ValueError(f"VQA image_id {image_id} not found in index")
         idx = alt
 
     return _VQA_DATASET[idx]["image"]
+
+
+# ----------------------------
+# Generic resolver
+# ----------------------------
+
+def resolve_image(sample: Dict[str, Any]) -> Any:
+    """
+    Resolve image for a prepared sample.
+
+    Priority:
+    1) If sample already contains an image object under "image": return it (ImageNet-R, many HF datasets)
+    2) Else if dataset_id == "vqa-v2": fetch image from VQA dataset via image_id index
+    3) Else error
+    """
+    # 1) Generic fast path: image object already present
+    if "image" in sample and sample["image"] is not None:
+        img = sample["image"]
+        # Usually PIL.Image.Image. If PIL isn't installed, just return it anyway.
+        if Image is None:
+            return img
+        # If it is PIL, return; if not PIL (rare), still return and let downstream handle.
+        if isinstance(img, Image.Image):
+            return img
+        return img
+
+    # 2) VQA special-case
+    if sample.get("dataset_id") == "vqa-v2":
+        return _resolve_vqa_image(sample)
+
+    raise ValueError(f"Cannot resolve image for sample: {sample.keys()}")

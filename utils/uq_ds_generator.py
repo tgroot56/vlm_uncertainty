@@ -421,7 +421,7 @@ def generate_supervised_uq_dataset(
 
             corr = score_multiple_choice(
                 pred_letter=pred_letter,
-                gt_letter=sample.get("gt_letter"),
+                gt_letter=sample.get("gt_key"),
                 normalize=True,
             )
 

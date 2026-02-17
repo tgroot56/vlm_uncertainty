@@ -4,21 +4,26 @@ import torch
 import re
 from typing import Dict, List, Tuple, Optional
 
-LETTERS = ["A", "B", "C", "D"]
 
+def _extract_first_key(text: str, option_keys: List[str]) -> Optional[str]:
+    """
+    Extract the first standalone option key from text.
+    Works for keys like A..Z and also AA/AB if present.
+    """
+    if not text:
+        return None
+    t = text.strip().upper()
 
-def _extract_first_letter(text: str) -> Optional[str]:
-    """
-    Extract the first standalone A/B/C/D from model text output.
-    
-    Args:
-        text: Raw model output text
-        
-    Returns:
-        First letter found (A/B/C/D) or None
-    """
-    m = re.search(r"\b([ABCD])\b", text.strip().upper())
+    # Longest keys first so "AA" matches before "A"
+    keys = sorted((k.upper() for k in option_keys), key=len, reverse=True)
+    if not keys:
+        return None
+
+    # Build regex like: \b(AA|AB|A|B|...)\b
+    pat = r"\b(" + "|".join(re.escape(k) for k in keys) + r")\b"
+    m = re.search(pat, t)
     return m.group(1) if m else None
+
 
 
 @torch.inference_mode()
@@ -28,46 +33,21 @@ def predict_letter_and_logits(
     device: torch.device,
     image,
     prompt: str,
-    option_letters: List[str] = LETTERS,
-) -> Tuple[Optional[str], Dict[str, float], Dict[str, float], str]:
-    """
-    Runs LLaVA on (image, prompt) and returns predictions with logits/probabilities.
-    
-    Args:
-        model: LLaVA model
-        processor: AutoProcessor for the model
-        device: torch device
-        image: PIL Image
-        prompt: Text prompt
-        option_letters: List of option letters (default: ["A", "B", "C", "D"])
-        
-    Returns:
-        Tuple of:
-            - predicted_letter (A/B/C/D or None)
-            - option_probs: dict letter -> probability among {A,B,C,D}
-            - option_logits: dict letter -> raw logit for that letter
-            - raw_text: decoded generation
-    """
-    conversation = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image"},
-                {"type": "text", "text": prompt},
-            ],
-        }
-    ]
+    option_letters: Optional[List[str]] = None,
+) -> Tuple[Optional[str], Optional[Dict[str, float]], Optional[Dict[str, float]], str]:
+
+    if option_letters is None:
+        option_letters = ["A", "B", "C", "D"]
+
+    conversation = [{
+        "role": "user",
+        "content": [{"type": "image"}, {"type": "text", "text": prompt}],
+    }]
 
     text_prompt = processor.apply_chat_template(conversation, add_generation_prompt=True)
-
-    inputs = processor(
-        text=[text_prompt],
-        images=[image],
-        return_tensors="pt",
-    )
+    inputs = processor(text=[text_prompt], images=[image], return_tensors="pt")
     inputs = {k: v.to(device) for k, v in inputs.items()}
 
-    # Generate 1–3 tokens; ask for scores so we can get logits for the first generated token
     out = model.generate(
         **inputs,
         max_new_tokens=3,
@@ -76,36 +56,40 @@ def predict_letter_and_logits(
         output_scores=True,
     )
 
-    # Decode only the newly generated tokens (continuation)
     prompt_len = inputs["input_ids"].shape[1]
     gen_ids = out.sequences[:, prompt_len:]
     raw_text = processor.batch_decode(gen_ids, skip_special_tokens=True)[0].strip()
 
-    # First-step logits (vocab-sized) for the first generated token
-    # `out.scores` is a list length = num_generated_tokens; take the first
-    first_step_logits = out.scores[0][0]  # shape: (vocab,)
+    # 1D tensor (V,)
+    first_step_logits = out.scores[0][0]
 
-    # Map letters -> token ids (most tokenizers have single-token "A"/"B"/"C"/"D")
-    letter_token_ids = {
-        L: processor.tokenizer.encode(L, add_special_tokens=False)[0]
-        for L in option_letters
-    }
+    # token ids for each option key, if single-token
+    letter_token_ids: Optional[Dict[str, int]] = {}
+    for L in option_letters:
+        ids = processor.tokenizer.encode(L, add_special_tokens=False)
+        if len(ids) != 1:
+            letter_token_ids = None
+            break
+        letter_token_ids[L] = ids[0]
 
-    option_logits = {L: float(first_step_logits[tid].item()) for L, tid in letter_token_ids.items()}
+    predicted = None
+    option_logits = None
+    option_probs = None
 
-    # Softmax over ONLY the 4 letter logits
-    logits_tensor = torch.tensor([option_logits[L] for L in option_letters], dtype=torch.float32)
-    probs_tensor = torch.softmax(logits_tensor, dim=0)
-    option_probs = {L: float(probs_tensor[i].item()) for i, L in enumerate(option_letters)}
+    if letter_token_ids is not None:
+        option_logits = {L: float(first_step_logits[tid].item()) for L, tid in letter_token_ids.items()}
+        logits_tensor = torch.stack([first_step_logits[letter_token_ids[L]] for L in option_letters]).float()
+        probs_tensor = torch.softmax(logits_tensor, dim=0)
+        option_probs = {L: float(probs_tensor[i].item()) for i, L in enumerate(option_letters)}
+        predicted = option_letters[int(torch.argmax(probs_tensor).item())]
 
-    predicted_letter = option_letters[int(torch.argmax(probs_tensor).item())]
+    # Always try to parse text and override if valid
+    parsed = _extract_first_key(raw_text, option_letters)
+    if parsed in option_letters:
+        predicted = parsed
 
-    # Also parse the text (sometimes it outputs "A." or "A)" etc.)
-    parsed_letter = _extract_first_letter(raw_text)
-    if parsed_letter in option_letters:
-        predicted_letter = parsed_letter
+    return predicted, option_probs, option_logits, raw_text
 
-    return predicted_letter, option_probs, option_logits, raw_text
 
 
 @torch.inference_mode()
@@ -115,7 +99,7 @@ def predict_letter_and_logits_with_features(
     device: torch.device,
     image,
     prompt: str,
-    option_letters: List[str] = LETTERS,
+    option_letters: Optional[List[str]] = None,
 ) -> Tuple[
     Optional[str],
     Dict[str, float],
@@ -128,6 +112,10 @@ def predict_letter_and_logits_with_features(
     torch.Tensor,                  # gen_ids: (B, T)
     torch.Tensor,                  # gen_step_logits: (B, T, V)
 ]:
+    if option_letters is None:
+        option_letters = ["A", "B", "C", "D"]
+        print("Warning: option_letters not provided; defaulting to A/B/C/D. If your task has different keys, pass them explicitly for accurate parsing and scoring.")
+    
     conversation = [
         {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}
     ]
@@ -214,27 +202,32 @@ def predict_letter_and_logits_with_features(
     # (B, T, V) logits for each generated step
     gen_step_logits = torch.stack(out.scores, dim=1)
 
-    # ---------------------------
-    # A/B/C/D first-token scoring
-    # ---------------------------
-    first_step_logits = out.scores[0]                      # (B, V)
-    # token ids for "A"/"B"/"C"/"D"
-    letter_token_ids = {
-        L: processor.tokenizer.encode(L, add_special_tokens=False)[0]
-        for L in option_letters
-    }
 
-    # use batch item 0 (since you're running batch size 1)
-    option_logits = {L: float(first_step_logits[0, tid].item()) for L, tid in letter_token_ids.items()}
+    first_step_logits = out.scores[0]                      
 
-    logits_tensor = torch.stack([first_step_logits[0, letter_token_ids[L]] for L in option_letters]).float()
-    probs_tensor = torch.softmax(logits_tensor, dim=0)
-    option_probs = {L: float(probs_tensor[i].item()) for i, L in enumerate(option_letters)}
+    letter_token_ids: Optional[Dict[str, int]] = {}
+    for L in option_letters:
+        ids = processor.tokenizer.encode(L, add_special_tokens=False)
+        if len(ids) != 1:
+            letter_token_ids = None
+            break
+        letter_token_ids[L] = ids[0]
 
-    predicted_letter = option_letters[int(torch.argmax(probs_tensor).item())]
-    parsed_letter = _extract_first_letter(raw_text)
+    if letter_token_ids is not None:
+        option_logits = {L: float(first_step_logits[0, tid].item()) for L, tid in letter_token_ids.items()}
+        logits_tensor = torch.stack([first_step_logits[0, letter_token_ids[L]] for L in option_letters]).float()
+        probs_tensor = torch.softmax(logits_tensor, dim=0)
+        option_probs = {L: float(probs_tensor[i].item()) for i, L in enumerate(option_letters)}
+        predicted_letter = option_letters[int(torch.argmax(probs_tensor).item())]
+    else:
+        option_logits = None
+        option_probs = None
+        predicted_letter = None
+
+    parsed_letter = _extract_first_key(raw_text, option_letters)
     if parsed_letter in option_letters:
         predicted_letter = parsed_letter
+
 
     # ---------------------------
     # Full forward pass to get answer hidden states
@@ -277,11 +270,6 @@ def predict_letter_and_logits_with_features(
     )
 
 
-import torch
-from typing import Dict, List, Tuple, Optional
-
-
-# ADDED: 
 @torch.inference_mode()
 def predict_answer_and_features(
     model,

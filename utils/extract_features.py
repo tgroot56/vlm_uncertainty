@@ -187,6 +187,34 @@ def extract_answer_entropy_stats(
     )
     return feats  # (B, 4)
 
+@torch.no_grad()
+def extract_lm_features_mean_pool_multi(
+    hidden_states: Tuple[torch.Tensor, ...],
+    layer_idx: int,
+    spans: List[Tuple[int, int]],
+) -> torch.Tensor:
+    layer_h = hidden_states[layer_idx]  # (B, S, H)
+    chunks = []
+    for a, b in spans:
+        if b > a:
+            chunks.append(layer_h[:, a:b, :])
+    if not chunks:
+        raise RuntimeError(f"empty spans {spans}")
+    x = torch.cat(chunks, dim=1)        # (B, N, H)
+    return x.mean(dim=1)                # (B, H)
+
+@torch.no_grad()
+def extract_lm_last_token_multi(
+    hidden_states: Tuple[torch.Tensor, ...],
+    layer_idx: int,
+    spans: List[Tuple[int, int]],
+) -> torch.Tensor:
+    layer_h = hidden_states[layer_idx]  # (B, S, H)
+    for a, b in reversed(spans):
+        if b > a:
+            return layer_h[:, b - 1, :] # (B, H)
+    raise RuntimeError(f"empty spans {spans}")
+
 
 
 

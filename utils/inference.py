@@ -4,6 +4,7 @@ import torch
 import re
 from typing import Dict, List, Tuple, Optional
 
+from src.uq_dataset_generation.token_spans import build_token_spans
 
 def _extract_first_key(text: str, option_keys: List[str]) -> Optional[str]:
     """
@@ -100,6 +101,7 @@ def predict_letter_and_logits_with_features(
     image,
     prompt: str,
     option_letters: Optional[List[str]] = None,
+    verbose: bool = False,
 ) -> Tuple[
     Optional[str],
     Dict[str, float],
@@ -123,6 +125,34 @@ def predict_letter_and_logits_with_features(
 
     inputs = processor(text=[text_prompt], images=[image], return_tensors="pt")
     inputs = {k: v.to(device) for k, v in inputs.items()}
+
+    # -------------------------------------------------
+    # DEBUG: Print prompt tokens (exact model input)
+    # -------------------------------------------------
+    if verbose:
+        input_ids_prompt = inputs["input_ids"][0]
+
+        print("\n" + "=" * 80)
+        print("PROMPT INPUT IDS SHAPE:", input_ids_prompt.shape)
+        print("PROMPT INPUT IDS:")
+        print(input_ids_prompt.tolist())
+
+        tokens_prompt = processor.tokenizer.convert_ids_to_tokens(
+            input_ids_prompt.tolist()
+        )
+
+        print("\nPROMPT TOKENS (token-by-token):")
+        for i, (tid, tok) in enumerate(zip(input_ids_prompt.tolist(), tokens_prompt)):
+            print(f"{i:4d} | id={tid:6d} | token={repr(tok)}")
+
+        decoded_prompt = processor.tokenizer.decode(
+            input_ids_prompt,
+            skip_special_tokens=False
+        )
+
+        print("\nPROMPT FULL DECODE:")
+        print(decoded_prompt)
+        print("=" * 80 + "\n")
 
     # ---------------------------
     # Vision tower hidden states
@@ -148,41 +178,17 @@ def predict_letter_and_logits_with_features(
         raise RuntimeError("Model did not return hidden_states. Ensure output_hidden_states=True works.")
 
     input_ids = inputs["input_ids"][0]
-    s_in = int(input_ids.numel())
-    s_hid = int(lm_hidden_states[0].shape[1])
+    prompt_len = int(inputs["input_ids"].shape[1])
+    lm_hidden_len = int(lm_hidden_states[0].shape[1])
 
-    image_token_id = getattr(getattr(model, "config", None), "image_token_index", None)
-    if image_token_id is None:
-        raise RuntimeError("model.config.image_token_index missing; can't find image placeholder reliably.")
-
-    mask = (input_ids == image_token_id)
-    if not mask.any():
-        raise RuntimeError("Could not find image placeholder token in input_ids; spans unreliable.")
-    image_token_position = int(mask.nonzero(as_tuple=True)[0][0].item())
-
-    num_visual_tokens = s_hid - s_in + 1
-    if num_visual_tokens <= 0:
-        raise RuntimeError(f"Non-positive num_visual_tokens={num_visual_tokens} (s_hid={s_hid}, s_in={s_in}).")
-
-    visual_start = image_token_position
-    visual_end = visual_start + num_visual_tokens
-
-    text_pre_start, text_pre_end = 0, visual_start
-    text_post_start, text_post_end = visual_end, s_hid
-
-    token_spans = {
-        "visual_start": visual_start,
-        "visual_end": visual_end,
-        "text_pre_start": text_pre_start,
-        "text_pre_end": text_pre_end,
-        "text_post_start": text_post_start,
-        "text_post_end": text_post_end,
-        "num_visual_tokens": num_visual_tokens,
-        "image_token_id": int(image_token_id),
-        "image_token_position": int(image_token_position),
-        "input_seq_len": s_in,
-        "hidden_seq_len": s_hid,
-    }
+    token_spans = build_token_spans(
+        model=model,
+        processor=processor,
+        input_ids=input_ids,
+        prompt_len=prompt_len,
+        lm_hidden_len=lm_hidden_len,
+        verbose=verbose,  # Set to True to enable detailed token span debug printing
+    )
 
     # ---------------------------
     # Generate (need scores)
@@ -234,8 +240,23 @@ def predict_letter_and_logits_with_features(
     # ---------------------------
     gen_len = int(gen_ids.shape[1])
     prompt_hidden_len = int(lm_hidden_states[0].shape[1])  # hidden-space prompt len
+
+    eos_id = processor.tokenizer.eos_token_id
+    pad_id = processor.tokenizer.pad_token_id
+
+    # gen_ids: (B, T) = generated part only
+    g = gen_ids[0].tolist()
+
+    effective_gen_len = len(g)
+    while effective_gen_len > 0:
+        tid = g[effective_gen_len - 1]
+        if (eos_id is not None and tid == eos_id) or (pad_id is not None and tid == pad_id):
+            effective_gen_len -= 1
+        else:
+            break
+
     answer_start = prompt_hidden_len
-    answer_end = answer_start + gen_len
+    answer_end = answer_start + effective_gen_len  # <-- excludes </s> if present
 
     token_spans["answer_start"] = answer_start
     token_spans["answer_end"] = answer_end
@@ -246,6 +267,65 @@ def predict_letter_and_logits_with_features(
         attention_mask = (full_sequence != processor.tokenizer.pad_token_id).long()
     else:
         attention_mask = torch.ones_like(full_sequence)
+    
+    # -------------------------------------------------
+    # DEBUG: Print FULL SEQUENCE (prompt + answer)
+    # -------------------------------------------------
+    if verbose: 
+
+        full_ids = full_sequence[0]   # (seq_len,)
+
+        print("\n" + "=" * 80)
+        print("FULL SEQUENCE (PROMPT + ANSWER)")
+        print("Full sequence shape:", full_ids.shape)
+        print("Full sequence ids:")
+        print(full_ids.tolist())
+
+        tokens_full = processor.tokenizer.convert_ids_to_tokens(
+            full_ids.tolist()
+        )
+
+        print("\nFULL SEQUENCE TOKENS (token-by-token):")
+        for i, (tid, tok) in enumerate(zip(full_ids.tolist(), tokens_full)):
+            print(f"{i:4d} | id={tid:6d} | token={repr(tok)}")
+
+        decoded_full = processor.tokenizer.decode(
+            full_ids,
+            skip_special_tokens=False
+        )
+
+        print("\nFULL SEQUENCE FULL DECODE:")
+        print(decoded_full)
+
+        print("\nAnswer span indices:")
+        print("answer_start:", token_spans["answer_start"])
+        print("answer_end:", token_spans["answer_end"])
+        print("answer_length:", token_spans["answer_length"])
+
+        print("=" * 80 + "\n")
+
+        full_ids = full_sequence[0]  # (seq_len,)
+        tokens_full = processor.tokenizer.convert_ids_to_tokens(
+            full_ids.tolist()
+        )
+
+        a0 = token_spans["answer_start"]
+        a1 = token_spans["answer_end"]
+
+        print("\n" + "=" * 80)
+        print("ANSWER SPAN TOKENS")
+        print(f"Span: [{a0}, {a1})  length={a1-a0}")
+
+        for i in range(a0, a1):
+            print(f"{i:4d} | id={int(full_ids[i])} | token={repr(tokens_full[i])}")
+
+        decoded_answer = processor.tokenizer.decode(
+            full_ids[a0:a1],
+            skip_special_tokens=False
+        )
+        print("\nDecoded answer span:")
+        print(decoded_answer)
+        print("=" * 80 + "\n")
 
     full_outputs = model(
         input_ids=full_sequence,
@@ -280,6 +360,7 @@ def predict_answer_and_features(
     max_new_tokens: int = 16,
     do_sample: bool = False,
     temperature: float = 1.0,
+    verbose: bool = False, 
 ) -> Tuple[
     str,                      # pred_answer (decoded)
     Tuple[torch.Tensor, ...], # vision_hidden_states
@@ -298,6 +379,34 @@ def predict_answer_and_features(
     inputs = processor(text=[text_prompt], images=[image], return_tensors="pt")
     inputs = {k: v.to(device) for k, v in inputs.items()}
 
+    # -------------------------------------------------
+    # DEBUG: Print prompt tokens (exact model input)
+    # -------------------------------------------------
+    if verbose:
+        input_ids_prompt = inputs["input_ids"][0]
+
+        print("\n" + "=" * 80)
+        print("PROMPT INPUT IDS SHAPE:", input_ids_prompt.shape)
+        print("PROMPT INPUT IDS:")
+        print(input_ids_prompt.tolist())
+
+        tokens_prompt = processor.tokenizer.convert_ids_to_tokens(
+            input_ids_prompt.tolist()
+        )
+
+        print("\nPROMPT TOKENS (token-by-token):")
+        for i, (tid, tok) in enumerate(zip(input_ids_prompt.tolist(), tokens_prompt)):
+            print(f"{i:4d} | id={tid:6d} | token={repr(tok)}")
+
+        decoded_prompt = processor.tokenizer.decode(
+            input_ids_prompt,
+            skip_special_tokens=False
+        )
+
+        print("\nPROMPT FULL DECODE:")
+        print(decoded_prompt)
+        print("=" * 80 + "\n")
+
     # 2) Vision tower hidden states (unchanged)
     vision_hidden_states = None
     if hasattr(model, "vision_tower") and hasattr(model.vision_tower, "vision_model"):
@@ -315,38 +424,17 @@ def predict_answer_and_features(
         raise RuntimeError("Model did not return hidden_states with output_hidden_states=True.")
 
     input_ids = inputs["input_ids"][0]
-    s_in = int(input_ids.numel())
-    s_hid = int(lm_hidden_states[0].shape[1])
+    prompt_len = int(inputs["input_ids"].shape[1])
+    lm_hidden_len = int(lm_hidden_states[0].shape[1])
 
-    image_token_id = getattr(getattr(model, "config", None), "image_token_index", None)
-    if image_token_id is None:
-        raise RuntimeError("model.config.image_token_index missing; can't find image placeholder reliably.")
-
-    mask = (input_ids == image_token_id)
-    if not mask.any():
-        raise RuntimeError("Could not find image placeholder token in input_ids; spans unreliable.")
-    image_token_position = int(mask.nonzero(as_tuple=True)[0][0].item())
-
-    num_visual_tokens = s_hid - s_in + 1
-    if num_visual_tokens <= 0:
-        raise RuntimeError(f"Non-positive num_visual_tokens={num_visual_tokens} (s_hid={s_hid}, s_in={s_in}).")
-
-    visual_start = image_token_position
-    visual_end = visual_start + num_visual_tokens
-
-    token_spans = {
-        "visual_start": visual_start,
-        "visual_end": visual_end,
-        "text_pre_start": 0,
-        "text_pre_end": visual_start,
-        "text_post_start": visual_end,
-        "text_post_end": s_hid,
-        "num_visual_tokens": num_visual_tokens,
-        "image_token_id": int(image_token_id),
-        "image_token_position": int(image_token_position),
-        "input_seq_len": s_in,
-        "hidden_seq_len": s_hid,
-    }
+    token_spans = build_token_spans(
+        model=model,
+        processor=processor,
+        input_ids=input_ids,
+        prompt_len=prompt_len,
+        lm_hidden_len=lm_hidden_len,
+        verbose=verbose,  # Set to True to enable detailed token span debug printing
+    )
 
     # 4) Generate answer + keep per-step logits (THIS is the key change)
     out = model.generate(
@@ -371,8 +459,23 @@ def predict_answer_and_features(
     # 5) Full forward pass on (prompt + answer) to get answer_hidden_states (unchanged)
     gen_len = int(gen_ids.shape[1])
     prompt_hidden_len = int(lm_hidden_states[0].shape[1])  # hidden-space prompt len
+
+    eos_id = processor.tokenizer.eos_token_id
+    pad_id = processor.tokenizer.pad_token_id
+
+    # gen_ids: (B, T) = generated part only
+    g = gen_ids[0].tolist()
+
+    effective_gen_len = len(g)
+    while effective_gen_len > 0:
+        tid = g[effective_gen_len - 1]
+        if (eos_id is not None and tid == eos_id) or (pad_id is not None and tid == pad_id):
+            effective_gen_len -= 1
+        else:
+            break
+
     answer_start = prompt_hidden_len
-    answer_end = answer_start + gen_len
+    answer_end = answer_start + effective_gen_len  # <-- excludes </s> if present
 
     token_spans["answer_start"] = answer_start
     token_spans["answer_end"] = answer_end
@@ -384,6 +487,62 @@ def predict_answer_and_features(
         attention_mask = (full_sequence != pad_id).long()
     else:
         attention_mask = torch.ones_like(full_sequence)
+
+    
+    # -------------------------------------------------
+    # DEBUG: Print full sequence tokens (prompt + answer)
+    # -------------------------------------------------
+    if verbose:
+        full_ids = full_sequence[0]  # (seq_len,)
+        tokens_full = processor.tokenizer.convert_ids_to_tokens(full_ids.tolist())
+
+        print("\n" + "=" * 80)
+        print("FULL SEQUENCE (PROMPT + GENERATED)")
+        print("Shape:", full_ids.shape)
+        print("IDs:")
+        print(full_ids.tolist())
+
+        print("\nFULL SEQUENCE TOKENS (token-by-token):")
+        for i, (tid, tok) in enumerate(zip(full_ids.tolist(), tokens_full)):
+            print(f"{i:4d} | id={int(tid):6d} | token={repr(tok)}")
+
+        decoded_full = processor.tokenizer.decode(
+            full_ids,
+            skip_special_tokens=False
+        )
+        print("\nFULL SEQUENCE FULL DECODE:")
+        print(decoded_full)
+
+        print("\nANSWER SPAN INDICES:")
+        print("answer_start:", answer_start)
+        print("answer_end:  ", answer_end)
+        print("answer_length:", answer_end - answer_start)
+
+        print("\nANSWER SPAN TOKENS (TRIMMED, used for features):")
+        for i in range(answer_start, answer_end):
+            print(f"{i:4d} | id={int(full_ids[i]):6d} | token={repr(tokens_full[i])}")
+
+        decoded_answer = processor.tokenizer.decode(
+            full_ids[answer_start:answer_end],
+            skip_special_tokens=False
+        )
+        print("\nDecoded answer span (trimmed):")
+        print(decoded_answer)
+
+        # Optional: also show raw generated tokens including EOS
+        raw_answer_end = prompt_hidden_len + gen_len
+        print("\nANSWER SPAN TOKENS (RAW, incl. EOS/PAD if present):")
+        for i in range(answer_start, raw_answer_end):
+            print(f"{i:4d} | id={int(full_ids[i]):6d} | token={repr(tokens_full[i])}")
+
+        decoded_raw_answer = processor.tokenizer.decode(
+            full_ids[answer_start:raw_answer_end],
+            skip_special_tokens=False
+        )
+        print("\nDecoded answer span (raw):")
+        print(decoded_raw_answer)
+
+        print("=" * 80 + "\n")
 
     full_outputs = model(
         input_ids=full_sequence,

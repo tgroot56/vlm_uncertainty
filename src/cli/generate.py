@@ -95,6 +95,13 @@ def parse_args():
         help="(ImageNet-R) Sample distractors from the top-N CLIP-similar labels (default: 30)."
     )
 
+    parser.add_argument(
+        "--max_samples", 
+        type=int, 
+        default=None
+    )
+
+
 
 
 

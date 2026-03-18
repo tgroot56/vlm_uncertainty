@@ -27,4 +27,5 @@ def run_train_probe(args):
         print_test_predictions=not args.no_print_test,
         use_class_weights=not args.no_class_weights,
         shuffle_train_labels=args.shuffle_train_labels,
+        num_components=args.num_components,
     )

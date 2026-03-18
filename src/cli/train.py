@@ -25,7 +25,7 @@ def parse_args():
                         help='Directory to save results')
     
     # Model arguments
-    parser.add_argument('--model_type', type=str, default='linear', choices=['linear', 'mlp'],
+    parser.add_argument('--model_type', type=str, default='linear', choices=['linear', 'mlp', 'component_attention_mlp'],
                         help='Model type: linear or mlp (default: linear)')
     parser.add_argument('--hidden_dims', type=int, nargs='+', default=None,
                         help='Hidden layer dimensions for MLP (e.g., 256 128)')
@@ -47,6 +47,8 @@ def parse_args():
                         help='Fraction of data for training (default: 0.7)')
     parser.add_argument('--val_split', type=float, default=0.15,
                         help='Fraction of data for validation (default: 0.15, test gets remaining)')
+    parser.add_argument('--num_components', type=int, default=4, 
+                        help='Number of components for ComponentAttentionMLPProbe (default: 4)')
     
     # Other arguments
     parser.add_argument('--shuffle_train_labels',
@@ -63,7 +65,6 @@ def parse_args():
     parser.add_argument('--device', type=str, default=None,
                         help='Device to use (cuda/cpu)')
    
-    # )
     return parser.parse_args()
 
 

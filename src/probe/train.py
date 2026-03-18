@@ -14,9 +14,10 @@ import matplotlib.pyplot as plt
 from tqdm.auto import tqdm
 from typing import Dict, Any, Optional
 import pandas as pd
+import numpy as np
 
 
-from ..probe.models import (LinearProbe, MLPProbe, BrierScoreLoss)
+from ..probe.models import (LinearProbe, MLPProbe, BrierScoreLoss, ComponentAttentionMLPProbe)
 from ..probe.metrics import compute_ece, compute_auroc, plot_reliability_diagram
 
 from ..probe.data import create_dataloaders, SupervisionDataset
@@ -215,11 +216,14 @@ def evaluate(
     return_preds: bool = False,
     save_reliability_path: Optional[str] = None,
     reliability_title: str = "Reliability diagram",
+    save_attention_path: Optional[str] = None,
+    attention_component_names: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     model.eval()
     total_loss = 0.0
     all_predictions = []
     all_labels = []
+    all_attention = []
 
     for features, labels in loader:
         features = features.to(device)
@@ -231,6 +235,10 @@ def evaluate(
         total_loss += loss.item()
         all_predictions.append(preds.detach().cpu())
         all_labels.append(labels.detach().cpu())
+
+        if hasattr(model, "get_attention_weights"):
+            attn = model.get_attention_weights(features)
+            all_attention.append(attn.detach().cpu())
 
     preds = torch.cat(all_predictions, dim=0).float()
     labs = torch.cat(all_labels, dim=0).float()
@@ -264,6 +272,25 @@ def evaluate(
     if auroc is not None:
         out["auroc"] = float(auroc)
 
+    if len(all_attention) > 0:
+        attention = torch.cat(all_attention, dim=0).float()   # [N, num_components]
+        mean_attention = attention.mean(dim=0)                # [num_components]
+
+        out["attention_weights"] = attention
+        out["mean_attention"] = mean_attention
+
+        if attention_component_names is not None:
+            if len(attention_component_names) != mean_attention.shape[0]:
+                raise ValueError(
+                    f"Got {len(attention_component_names)} attention component names, "
+                    f"but mean_attention has shape {tuple(mean_attention.shape)}"
+                )
+            out["attention_component_names"] = attention_component_names
+
+        if save_attention_path is not None:
+            print(f"mean_attention: {mean_attention}")
+            np.save(save_attention_path, mean_attention.numpy())
+            np.save(save_attention_path.replace(".npy", "_all.npy"), attention.numpy())
 
     if return_preds:
         out["predictions"] = preds
@@ -291,7 +318,8 @@ def train_probe(
     device: Optional[torch.device] = None,
     print_test_predictions: bool = True,
     use_class_weights: bool = False,
-    shuffle_train_labels: bool = False
+    shuffle_train_labels: bool = False,
+    num_components: int = 4,
 ):
     """
     Train a linear probe on the extracted features.
@@ -312,6 +340,7 @@ def train_probe(
         print_test_predictions: Whether to print test set predictions
         use_class_weights: Whether to use class weighting for imbalanced data
         shuffle_train_labels: Whether to shuffle training data for baseline
+        num_components: Number of components for ComponentAttentionMLPProbe (if used)   
     """
     print(f"\nStarting training of probe model...")
     # Set random seed
@@ -384,6 +413,19 @@ def train_probe(
         print(f"  Hidden layers: {hidden_dims}")
         print(f"  Activation: {activation}")
         print(f"  Dropout: {dropout}")
+    elif model_type == "component_attention_mlp":
+        model = ComponentAttentionMLPProbe(
+            input_dim=input_dim,
+            hidden_dims=hidden_dims,
+            dropout=dropout,
+            activation=activation,
+            num_components=num_components,   # e.g. 4
+        ).to(device)
+        print(f"\nModel: ComponentAttentionMLPProbe with {input_dim} input features")
+        print(f"  Hidden layers: {hidden_dims}")
+        print(f"  Activation: {activation}")
+        print(f"  Dropout: {dropout}")
+        print(f"  Num components: {num_components}")
     else:
         raise ValueError(f"Unknown model_type: {model_type}. Use 'linear' or 'mlp'")
     
@@ -495,6 +537,12 @@ def train_probe(
     checkpoint = torch.load(os.path.join(output_dir, "best_model.pt"), weights_only=False)
     model.load_state_dict(checkpoint["model_state_dict"])
 
+    feature_names = [
+        "lm_answer_mean_layer_16",
+        "lm_question_mean_layer_16",
+        "lm_visual_mean_layer_16",
+    ]
+
     test_metrics = evaluate(
         model,
         test_loader,
@@ -503,6 +551,8 @@ def train_probe(
         return_preds=True,
         save_reliability_path=os.path.join(output_dir, "reliability_diagram.png"),
         reliability_title="Test-set reliability diagram",
+        save_attention_path=os.path.join(output_dir, "mean_attention.npy") if model_type == "component_attention_mlp" else None,
+        attention_component_names=feature_names if model_type == "component_attention_mlp" else None,
     )
 
     # metrics_test.json (as requested)

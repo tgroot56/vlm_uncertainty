@@ -30,9 +30,11 @@ mkdir -p "$VLM_UQ_PREP_CACHE"
 #set variables
 VLM_ID="llava-hf/llava-1.5-7b-hf"
 DATASET="imagenet-r"
-OUTPUT_DIR="outputs/supervised_datasets"
+OUTPUT_DIR="/scratch-shared/tgroot/supervised_datasets/imagenet_r_16mc"
 SEED=42
 DEVICE="cuda"
+
+echo "Saving to: $OUTPUT_DIR"
 
 srun python -u -m src.cli.generate \
     --vlm $VLM_ID \
@@ -42,4 +44,4 @@ srun python -u -m src.cli.generate \
     --device $DEVICE \
     --k_options 16 \
     --clip_negatives \
-    --clip_mode gt_to_text
+    --clip_mode gt_to_text \

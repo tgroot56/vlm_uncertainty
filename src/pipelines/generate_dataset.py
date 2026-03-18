@@ -25,7 +25,6 @@ def run_generate_dataset(args):
     device = args.device
     verbose = args.verbose
     
-    # Rest of your pipeline code here
     print(f"Generating dataset for {dataset_id} using {vlm_id}")
     
     # Step 1: Load model
@@ -60,8 +59,8 @@ def run_generate_dataset(args):
         dataset_id=dataset_id,
         split=("test" if dataset_id == "imagenet-r" else "validation"),
         seed_offset=seed,
-        max_samples=None,
         use_cache=True,
+        max_samples=args.max_samples, 
         dataset_kwargs=dataset_kwargs,
     )
 
@@ -73,7 +72,7 @@ def run_generate_dataset(args):
         model_id=vlm_id,
         output_root=output_dir,
         seed_offset=seed,
-        max_samples=None,  # or args.max_samples if you add this argument
+        max_samples=args.max_samples,  
         verbose=verbose,
     )
 

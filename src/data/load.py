@@ -49,11 +49,11 @@ def load_dataset_prepared(
     spec = get_dataset_spec(dataset_id)
     split = split or spec.default_split
 
-    # Optimized cache check (optional)
-    if use_cache:
+    # Optimized cache check (skip if max_samples is set since cache won't match)
+    if use_cache and max_samples is None:
         cached_any = find_matching_cache(dataset_id, split, seed_offset, dataset_kwargs)
-        if cached_any is not None and (max_samples is None or len(cached_any) >= max_samples):
-            return cached_any if max_samples is None else cached_any[:max_samples]
+        if cached_any is not None:
+            return cached_any
 
     ds = load_hf_dataset(spec.hf_name)
     split_obj = ds[split]

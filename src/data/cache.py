@@ -60,7 +60,9 @@ def load_cache(
     dataset_kwargs: Optional[Dict[str, Any]],
 ) -> Optional[List[Dict]]:
     path = cache_path(dataset_id, split, seed_offset, num_samples, dataset_kwargs)
+    print("searched for cache at:", path)
     if not os.path.exists(path):
+        print("No cache file found.")
         return None
 
     try:
@@ -126,6 +128,7 @@ def find_matching_cache(
         if not fname.startswith("prepared_") or not fname.endswith(".pkl"):
             continue
         path = os.path.join(CACHE_DIR, fname)
+        print(f"Checking cache file: {fname} (this may take a while for large files)...")
         try:
             with open(path, "rb") as f:
                 payload = pickle.load(f)
@@ -138,7 +141,8 @@ def find_matching_cache(
             ):
                 print(f"Found matching cache: {path}")
                 return payload["samples"]
-        except Exception:
+        except Exception as e:
+            print(f"Skipping {fname}: {e}")
             continue
 
     return None

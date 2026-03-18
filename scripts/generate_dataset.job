@@ -1,11 +1,11 @@
 #!/bin/bash
 
-#SBATCH --partition=gpu_a100
+#SBATCH --partition=gpu_h100
 #SBATCH --gpus=1
 #SBATCH --job-name=generate_ds_vqa
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=06:00:00
+#SBATCH --time=00:50:00
 #SBATCH --output=slurm_outputs/generate_ds_vqa_%A.out
 
 module purge
@@ -30,7 +30,7 @@ mkdir -p "$VLM_UQ_PREP_CACHE"
 #set variables
 VLM_ID="llava-hf/llava-1.5-7b-hf"
 DATASET="vqa-v2"
-OUTPUT_DIR="outputs/supervised_datasets"
+OUTPUT_DIR="/scratch-shared/tgroot/supervised_datasets"
 SEED=42
 DEVICE="cuda"
 
@@ -39,4 +39,4 @@ srun python -u -m src.cli.generate \
     --dataset $DATASET \
     --output_dir $OUTPUT_DIR \
     --seed $SEED \
-    --device $DEVICE 
+    --device $DEVICE \

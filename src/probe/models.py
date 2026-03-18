@@ -126,6 +126,184 @@ class MLPProbe(nn.Module):
         probs = torch.sigmoid(logits).squeeze(-1)  # [batch_size]
         return probs
 
+class ComponentAttentionMLPProbe(nn.Module):
+    """
+    Component-attention MLP probe for confidence / correctness prediction.
+
+    Expected input:
+        x of shape [batch_size, input_dim]
+    where input_dim = num_components * component_dim
+
+    The model internally reshapes x to:
+        [batch_size, num_components, component_dim]
+
+    It then:
+    1. computes an attention score for each component
+    2. forms a weighted sum of the component vectors
+    3. predicts a probability with an MLP head
+
+    This is designed to integrate with an existing pipeline that already
+    concatenates multiple component vectors into one flat feature vector.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: list[int] = [256, 128],
+        dropout: float = 0.2,
+        activation: str = "relu",
+        num_components: int = 4,
+        attn_hidden_dim: int = 128,
+        use_batchnorm: bool = True,
+        return_attention: bool = False,
+    ):
+        """
+        Args:
+            input_dim: Total input feature dimension = num_components * component_dim
+            hidden_dims: Hidden dimensions for the regression MLP head
+            dropout: Dropout probability
+            activation: Activation function ('relu', 'gelu', 'elu')
+            num_components: Number of concatenated component vectors
+            attn_hidden_dim: Hidden size for the attention scoring MLP
+            use_batchnorm: Whether to use BatchNorm in the regression head
+            return_attention: If True, forward returns (probs, attention_weights).
+                              If False, forward returns probs only.
+        """
+        super().__init__()
+
+        if input_dim % num_components != 0:
+            raise ValueError(
+                f"input_dim ({input_dim}) must be divisible by num_components "
+                f"({num_components}) for ComponentAttentionMLPProbe."
+            )
+
+        self.input_dim = input_dim
+        self.num_components = num_components
+        self.component_dim = input_dim // num_components
+        self.return_attention = return_attention
+        self.use_batchnorm = use_batchnorm
+
+        # Choose activation
+        if activation == "relu":
+            self.activation_name = "relu"
+            activation_layer = nn.ReLU
+        elif activation == "gelu":
+            self.activation_name = "gelu"
+            activation_layer = nn.GELU
+        elif activation == "elu":
+            self.activation_name = "elu"
+            activation_layer = nn.ELU
+        else:
+            raise ValueError(f"Unknown activation: {activation}")
+
+        # Attention network applied independently to each component vector
+        # Input:  [B, C, D]
+        # Output: [B, C, 1]
+        self.attn_net = nn.Sequential(
+            nn.Linear(self.component_dim, attn_hidden_dim),
+            activation_layer(),
+            nn.Linear(attn_hidden_dim, 1)
+        )
+
+        # Regression head on the pooled representation [B, D]
+        mlp_layers = []
+        prev_dim = self.component_dim
+
+        for hidden_dim in hidden_dims:
+            mlp_layers.append(nn.Linear(prev_dim, hidden_dim))
+            if use_batchnorm:
+                mlp_layers.append(nn.BatchNorm1d(hidden_dim))
+            mlp_layers.append(activation_layer())
+            mlp_layers.append(nn.Dropout(dropout))
+            prev_dim = hidden_dim
+
+        mlp_layers.append(nn.Linear(prev_dim, 1))
+        self.regressor = nn.Sequential(*mlp_layers)
+
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize linear layers with Xavier uniform."""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def _reshape_components(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Reshape flat concatenated input into component structure.
+
+        Args:
+            x: Tensor of shape [B, input_dim]
+
+        Returns:
+            Tensor of shape [B, num_components, component_dim]
+        """
+        if x.ndim != 2:
+            raise ValueError(
+                f"Expected x to have shape [B, input_dim], got shape {tuple(x.shape)}"
+            )
+        if x.shape[1] != self.input_dim:
+            raise ValueError(
+                f"Expected input_dim={self.input_dim}, got x.shape[1]={x.shape[1]}"
+            )
+
+        return x.view(x.shape[0], self.num_components, self.component_dim)
+
+    def forward(self, x: torch.Tensor):
+        """
+        Forward pass.
+
+        Args:
+            x: Input features of shape [batch_size, input_dim]
+
+        Returns:
+            If return_attention=False:
+                probs of shape [batch_size]
+            If return_attention=True:
+                (probs, attention_weights)
+                probs: [batch_size]
+                attention_weights: [batch_size, num_components]
+        """
+        # [B, C, D]
+        x_components = self._reshape_components(x)
+
+        # Compute component attention scores: [B, C, 1]
+        attn_scores = self.attn_net(x_components)
+
+        # Normalize over components: [B, C, 1]
+        attn_weights = torch.softmax(attn_scores, dim=1)
+
+        # Weighted sum pooling: [B, D]
+        pooled = (attn_weights * x_components).sum(dim=1)
+
+        # Regression head: [B, 1]
+        logits = self.regressor(pooled)
+
+        # Probability output: [B]
+        probs = torch.sigmoid(logits).squeeze(-1)
+
+        if self.return_attention:
+            return probs, attn_weights.squeeze(-1)
+
+        return probs
+
+    def get_attention_weights(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Compute attention weights for each component.
+
+        Args:
+            x: Input features [batch_size, input_dim]
+
+        Returns:
+            attention weights [batch_size, num_components]
+        """
+        x_components = self._reshape_components(x)
+        attn_scores = self.attn_net(x_components)
+        attn_weights = torch.softmax(attn_scores, dim=1)
+        return attn_weights.squeeze(-1)
+
 
 class BrierScoreLoss(nn.Module):
     """

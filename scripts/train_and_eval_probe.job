@@ -25,14 +25,15 @@ export TRANSFORMERS_CACHE=/scratch-shared/$USER/hf_transformers
 mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$TRANSFORMERS_CACHE"
 
 #set variables
-# DATA_PATH="outputs/supervised_datasets/imagenet-r/llava-hf/llava-1.5-7b-hf/run_b8e74dc670/supervision_dataset.pt"
-DATA_PATH="outputs/supervised_datasets/vqa-v2/llava-hf/llava-1.5-7b-hf/run_cc1adbca16/supervision_dataset.pt"
-FEATURES="answer_gen_negp_max lm_answer_lasttok_layer_-1"
-MODEL_TYPE="mlp"
-OUTPUT_DIR="probe_results/vqa-v2"
+DATA_PATH="/scratch-shared/tgroot/supervised_datasets/imagenet_r_16mc/imagenet-r/llava-hf/llava-1.5-7b-hf/run_035f83a53c/supervision_dataset.pt"
+# DATA_PATH="outputs/supervised_datasets/vqa-v2/llava-hf/llava-1.5-7b-hf/run_cc1adbca16/supervision_dataset.pt"
+FEATURES="lm_answer_mean_layer_16 lm_question_mean_layer_16 lm_visual_mean_layer_16"
+MODEL_TYPE="component_attention_mlp"
+OUTPUT_DIR="probe_results/imagenet-r/16mc-clip"
 HIDDEN_DIMS="256 128"
 NUM_EPOCHS=100
 BATCH_SIZE=32
+NUM_COMPONENTS=3
 
 srun python -u -m src.cli.train \
   --data_path $DATA_PATH \
@@ -42,5 +43,6 @@ srun python -u -m src.cli.train \
   --num_epochs $NUM_EPOCHS \
   --batch_size $BATCH_SIZE \
   --output_dir $OUTPUT_DIR \
-  --no_class_weights
+  --no_class_weights \
+  --num_components $NUM_COMPONENTS
 

@@ -15,6 +15,8 @@ from utils.extract_features import (
     extract_vision_features_mean_pool,
     extract_lm_features_mean_pool,
     extract_lm_last_k_tokens,
+    extract_lm_features_mean_pool_multi,
+    extract_lm_last_token_multi,
 )
 from utils.image_resolver import resolve_image
 
@@ -43,17 +45,25 @@ def _run_id_from_config(cfg: SupervisionGenConfig) -> str:
             "vision_final": cfg.use_vision_final,
             "lm_visual_middle": cfg.use_lm_visual_middle,
             "lm_visual_final": cfg.use_lm_visual_final,
-            "lm_prompt_middle": cfg.use_lm_prompt_middle,
-            "lm_prompt_final": cfg.use_lm_prompt_final,
+            "lm_question_middle": cfg.use_lm_question_middle,
+            "lm_question_final": cfg.use_lm_question_final,
             "lm_answer_middle": cfg.use_lm_answer_middle,
             "lm_answer_final": cfg.use_lm_answer_final,
             "lm_visual_middle_lasttoken": cfg.use_lm_visual_middle_lasttoken,
             "lm_visual_final_lasttoken": cfg.use_lm_visual_final_lasttoken,
-            "lm_prompt_middle_lasttoken": cfg.use_lm_prompt_middle_lasttoken,
-            "lm_prompt_final_lasttoken": cfg.use_lm_prompt_final_lasttoken,
+            "lm_question_middle_lasttoken": cfg.use_lm_question_middle_lasttoken,
+            "lm_question_final_lasttoken": cfg.use_lm_question_final_lasttoken,
             "lm_answer_middle_lasttoken": cfg.use_lm_answer_middle_lasttoken,
             "lm_answer_final_lasttoken": cfg.use_lm_answer_final_lasttoken,
             "answer_prob_entropy_stats": cfg.use_answer_prob_entropy_stats,
+            "lm_fullspan_middle": cfg.use_lm_fullspan_middle,
+            "lm_fullspan_final": cfg.use_lm_fullspan_final,
+            "lm_fullspan_middle_lasttoken": cfg.use_lm_fullspan_middle_lasttoken,
+            "lm_fullspan_final_lasttoken": cfg.use_lm_fullspan_final_lasttoken,
+            "lm_question_including_middle": cfg.use_lm_question_including_middle,
+            "lm_question_including_final": cfg.use_lm_question_including_final,
+            "lm_question_including_middle_lasttoken": cfg.use_lm_question_including_middle_lasttoken,
+            "lm_question_including_final_lasttoken": cfg.use_lm_question_including_final_lasttoken,
         },
     }
     s = json.dumps(key, sort_keys=True).encode()
@@ -147,6 +157,26 @@ def _extract_lm_last_token(
     )
     assert feats_3d.dim() == 3 and feats_3d.shape[1] == 1, f"{name}: expected (B,1,H), got {tuple(feats_3d.shape)}"
     feats = feats_3d[:, 0, :]
+    _assert_valid_2d(feats, name)
+    return feats
+
+def _extract_lm_mean_pool_multi(
+    lm_hidden_states: Tuple[torch.Tensor, ...],
+    layer_idx: int,
+    spans: List[Tuple[int, int]],
+    name: str,
+) -> torch.Tensor:
+    feats = extract_lm_features_mean_pool_multi(lm_hidden_states, layer_idx, spans)
+    _assert_valid_2d(feats, name)
+    return feats
+
+def _extract_lm_last_token_multi(
+    lm_hidden_states: Tuple[torch.Tensor, ...],
+    layer_idx: int,
+    spans: List[Tuple[int, int]],
+    name: str,
+) -> torch.Tensor:
+    feats = extract_lm_last_token_multi(lm_hidden_states, layer_idx, spans)
     _assert_valid_2d(feats, name)
     return feats
 
@@ -253,7 +283,7 @@ def generate_supervised_uq_dataset(
         mininterval=30.0,
         smoothing=0.1,
         dynamic_ncols=True,
-        disable=cfg.verbose,
+        disable=False,
         leave=True,
     )
 
@@ -266,6 +296,9 @@ def generate_supervised_uq_dataset(
 
         # dataset-specific prediction kwargs (e.g., option_keys later)
         pred_kwargs = task.predict_kwargs(sample)
+
+        if "verbose" not in pred_kwargs:
+            pred_kwargs["verbose"] = cfg.verbose    
 
         prediction_output = predict_fn(
             model=model,
@@ -304,13 +337,15 @@ def generate_supervised_uq_dataset(
                 per_sample_feats.append(f)
                 per_sample_names.append("vision_mean_layer_-1")
 
-        # LM prompt/visual spans
+        # LM question/visual spans
         if lm_hidden_states is not None and token_spans:
             n_lm = len(lm_hidden_states)
             mid_lm = _get_middle_idx(n_lm, cfg.force_middle_layer)
 
             v0, v1 = token_spans["visual_start"], token_spans["visual_end"]
-            p0, p1 = token_spans["text_post_start"], token_spans["text_post_end"]
+            q0, q1 = token_spans["question_start"], token_spans["question_end"]
+            fs0, fs1 = token_spans["fullspan_start"], token_spans["fullspan_end"]
+            qin_spans = token_spans["question_including_spans"]
 
             if cfg.use_lm_visual_middle:
                 f = _extract_lm_mean_pool(lm_hidden_states, mid_lm, v0, v1, name=f"lm_mid_visual_{mid_lm}")
@@ -322,15 +357,15 @@ def generate_supervised_uq_dataset(
                 per_sample_feats.append(f)
                 per_sample_names.append("lm_visual_mean_layer_-1")
 
-            if cfg.use_lm_prompt_middle:
-                f = _extract_lm_mean_pool(lm_hidden_states, mid_lm, p0, p1, name=f"lm_mid_prompt_{mid_lm}")
+            if cfg.use_lm_question_middle:
+                f = _extract_lm_mean_pool(lm_hidden_states, mid_lm, q0, q1, name=f"lm_mid_question_{mid_lm}")
                 per_sample_feats.append(f)
-                per_sample_names.append(f"lm_prompt_mean_layer_{mid_lm}")
+                per_sample_names.append(f"lm_question_mean_layer_{mid_lm}")
 
-            if cfg.use_lm_prompt_final:
-                f = _extract_lm_mean_pool(lm_hidden_states, -1, p0, p1, name="lm_final_prompt_-1")
+            if cfg.use_lm_question_final:
+                f = _extract_lm_mean_pool(lm_hidden_states, -1, q0, q1, name="lm_final_question_-1")
                 per_sample_feats.append(f)
-                per_sample_names.append("lm_prompt_mean_layer_-1")
+                per_sample_names.append("lm_question_mean_layer_-1")
 
             if cfg.use_lm_visual_middle_lasttoken:
                 f = _extract_lm_last_token(lm_hidden_states, mid_lm, v0, v1, name=f"lm_mid_visual_lasttok_{mid_lm}")
@@ -342,15 +377,55 @@ def generate_supervised_uq_dataset(
                 per_sample_feats.append(f)
                 per_sample_names.append("lm_visual_lasttok_layer_-1")
 
-            if cfg.use_lm_prompt_middle_lasttoken:
-                f = _extract_lm_last_token(lm_hidden_states, mid_lm, p0, p1, name=f"lm_mid_prompt_lasttok_{mid_lm}")
+            if cfg.use_lm_question_middle_lasttoken:
+                f = _extract_lm_last_token(lm_hidden_states, mid_lm, q0, q1, name=f"lm_mid_question_lasttok_{mid_lm}")
                 per_sample_feats.append(f)
-                per_sample_names.append(f"lm_prompt_lasttok_layer_{mid_lm}")
+                per_sample_names.append(f"lm_question_lasttok_layer_{mid_lm}")
 
-            if cfg.use_lm_prompt_final_lasttoken:
-                f = _extract_lm_last_token(lm_hidden_states, -1, p0, p1, name="lm_final_prompt_lasttok_-1")
+            if cfg.use_lm_question_final_lasttoken:
+                f = _extract_lm_last_token(lm_hidden_states, -1, q0, q1, name="lm_final_question_lasttok_-1")
                 per_sample_feats.append(f)
-                per_sample_names.append("lm_prompt_lasttok_layer_-1")
+                per_sample_names.append("lm_question_lasttok_layer_-1")
+            # full span features
+            if cfg.use_lm_fullspan_middle:
+                f = _extract_lm_mean_pool(lm_hidden_states, mid_lm, fs0, fs1, name=f"lm_mid_fullspan_{mid_lm}")
+                per_sample_feats.append(f)
+                per_sample_names.append(f"lm_fullspan_mean_layer_{mid_lm}")
+
+            if cfg.use_lm_fullspan_final:
+                f = _extract_lm_mean_pool(lm_hidden_states, -1, fs0, fs1, name="lm_final_fullspan_-1")
+                per_sample_feats.append(f)
+                per_sample_names.append("lm_fullspan_mean_layer_-1")
+
+            if cfg.use_lm_fullspan_middle_lasttoken:
+                f = _extract_lm_last_token(lm_hidden_states, mid_lm, fs0, fs1, name=f"lm_mid_fullspan_lasttok_{mid_lm}")
+                per_sample_feats.append(f)
+                per_sample_names.append(f"lm_fullspan_lasttok_layer_{mid_lm}")
+
+            if cfg.use_lm_fullspan_final_lasttoken:
+                f = _extract_lm_last_token(lm_hidden_states, -1, fs0, fs1, name="lm_final_fullspan_lasttok_-1")
+                per_sample_feats.append(f)
+                per_sample_names.append("lm_fullspan_lasttok_layer_-1")
+
+            if cfg.use_lm_question_including_middle:
+                f = _extract_lm_mean_pool_multi(lm_hidden_states, mid_lm, qin_spans, name=f"lm_mid_question_including_{mid_lm}")
+                per_sample_feats.append(f)
+                per_sample_names.append(f"lm_question_including_mean_layer_{mid_lm}")
+
+            if cfg.use_lm_question_including_final:
+                f = _extract_lm_mean_pool_multi(lm_hidden_states, -1, qin_spans, name="lm_final_question_including_-1")
+                per_sample_feats.append(f)
+                per_sample_names.append("lm_question_including_mean_layer_-1")
+
+            if cfg.use_lm_question_including_middle_lasttoken:
+                f = _extract_lm_last_token_multi(lm_hidden_states, mid_lm, qin_spans, name=f"lm_mid_question_including_lasttok_{mid_lm}")
+                per_sample_feats.append(f)
+                per_sample_names.append(f"lm_question_including_lasttok_layer_{mid_lm}")
+
+            if cfg.use_lm_question_including_final_lasttoken:
+                f = _extract_lm_last_token_multi(lm_hidden_states, -1, qin_spans, name="lm_final_question_including_lasttok_-1")
+                per_sample_feats.append(f)
+                per_sample_names.append("lm_question_including_lasttok_layer_-1")
 
         # Answer span features
         if answer_hidden_states is not None and token_spans and (

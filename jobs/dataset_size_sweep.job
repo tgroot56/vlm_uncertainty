@@ -2,11 +2,11 @@
 
 #SBATCH --partition=gpu_a100
 #SBATCH --gpus=1
-#SBATCH --job-name=run
+#SBATCH --job-name=datasize_sweep
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=12:00:00
-#SBATCH --output=slurm_outputs/run_%A.out
+#SBATCH --time=06:00:00
+#SBATCH --output=slurm_outputs/datasize_sweep_%A.out
 
 module purge
 module load 2025
@@ -19,14 +19,14 @@ source activate llava-experiments
 
 export HF_HOME=/scratch-shared/$USER/hf_home
 export HF_DATASETS_CACHE=/scratch-shared/$USER/hf_datasets
-
 export TRANSFORMERS_CACHE=/scratch-shared/$USER/hf_transformers
 
-mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$TRANSFORMERS_CACHE"
 
 export VLM_UQ_PREP_CACHE=/scratch-shared/$USER/vlm_uq_prepared_cache
-mkdir -p "$VLM_UQ_PREP_CACHE"
 
 
-# Choose dataset: vqa-v2 or imagenet-r
-srun python quick_tests/test_vqa_accuracy.py
+srun python -m utils.tables_and_plots.dataset_size_sweep \
+  --data-path outputs/supervised_datasets/imagenet-r/llava-hf/llava-1.5-7b-hf/run_b8e74dc670/supervision_dataset.pt \
+  --num-epochs 20 \
+  --batch-size 32
+

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
+from tqdm import tqdm
 
 
 def prepare_default_split(split_obj, seed_offset: int, max_samples: Optional[int]) -> List[Dict]:
@@ -23,8 +24,7 @@ def prepare_vqa_v2_split(split_obj, seed_offset: int, max_samples: Optional[int]
         split_obj = split_obj.select(range(min(max_samples, len(split_obj))))
 
     samples: List[Dict] = []
-    for idx in range(len(split_obj)):
-        row = split_obj[idx]
+    for idx, row in enumerate(tqdm(split_obj)):
 
         raw_answers = row.get("answers", [])
         if isinstance(raw_answers, list) and raw_answers and isinstance(raw_answers[0], dict):
@@ -39,6 +39,7 @@ def prepare_vqa_v2_split(split_obj, seed_offset: int, max_samples: Optional[int]
         samples.append(
             {
                 "idx": idx,
+                "image": row.get("image"),
                 "question": row.get("question", ""),
                 "prompt": prompt,
                 "gt_answers": all_answers,

@@ -1,12 +1,12 @@
 #!/bin/bash
 
-#SBATCH --partition=gpu_a100
+#SBATCH --partition=gpu_h100
 #SBATCH --gpus=1
-#SBATCH --job-name=mlp_vqa_probes
+#SBATCH --job-name=mlp_imagenet-r_eval_probe
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=12:00:00
-#SBATCH --output=slurm_outputs/mlp_vqa_probes_%A.out
+#SBATCH --time=00:05:00
+#SBATCH --output=slurm_outputs/mlp_glb_imagenet-r_eval_probe_%A.out
 
 module purge
 module load 2025
@@ -24,51 +24,24 @@ export TRANSFORMERS_CACHE=/scratch-shared/$USER/hf_transformers
 
 mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$TRANSFORMERS_CACHE"
 
-# ------------------------------------------------------------------
-# Experiment config
-# ------------------------------------------------------------------
-# DATA_PATH="/scratch-shared/tgroot/supervised_datasets/imagenet_r_16mc/imagenet-r/llava-hf/llava-1.5-7b-hf/run_035f83a53c/supervision_dataset.pt"
-DATA_PATH="/scratch-shared/tgroot/supervised_datasets/vqa-v2/llava-hf/llava-1.5-7b-hf/run_7f57ad86ba/supervision_dataset.pt"
-MODEL_TYPE="mlp"  
-NUM_EPOCHS=20
-BATCH_SIZE=32
-OUTPUT_DIR="probe_results/vqa-v2"
-# OUTPUT_DIR="probe_results/imagenet-r/16mc-clip"
 
 
 # List of SINGLE features to test (one per run)
 FEATURE_LIST=(
   vision_mean_layer_12
   vision_mean_layer_-1
-
   lm_visual_mean_layer_16
   lm_visual_mean_layer_-1
-
-  lm_question_mean_layer_16
-  lm_question_mean_layer_-1
-
+  lm_prompt_mean_layer_16
+  lm_prompt_mean_layer_-1
   lm_visual_lasttok_layer_16
   lm_visual_lasttok_layer_-1
-
-  lm_question_lasttok_layer_16
-  lm_question_lasttok_layer_-1
-
+  lm_prompt_lasttok_layer_16
+  lm_prompt_lasttok_layer_-1
   lm_answer_mean_layer_16
   lm_answer_mean_layer_-1
-
   lm_answer_lasttok_layer_16
   lm_answer_lasttok_layer_-1
-
-  lm_fullspan_mean_layer_16
-  lm_fullspan_mean_layer_-1
-  lm_fullspan_lasttok_layer_16
-  lm_fullspan_lasttok_layer_-1
-
-  lm_question_including_mean_layer_16
-  lm_question_including_mean_layer_-1
-  lm_question_including_lasttok_layer_16
-  lm_question_including_lasttok_layer_-1
-
   answer_gen_negp_max
   answer_gen_negp_min
   answer_gen_negp_mean
@@ -85,18 +58,25 @@ FEATURE_LIST=(
 # Run loop
 # ------------------------------------------------------------------
 
+DATA_PATH="outputs/supervised_datasets/imagenet-r/llava-hf/llava-1.5-7b-hf/run_b8e74dc670/supervision_dataset.pt"
+# DATA_PATH="outputs/supervised_datasets/vqa-v2/llava-hf/llava-1.5-7b-hf/run_cc1adbca16/supervision_dataset.pt"
+# OUTPUT_DIR="probe_results/imagenet-r/generalizability/to_vqa"
+OUTPUT_DIR="probe_results/vqa-v2/generalizability/to_imagenet-r"
+
 for FEATURE in "${FEATURE_LIST[@]}"; do
   echo "============================================================"
   echo "Running probe for feature: ${FEATURE}"
   echo "============================================================"
+  # MODEL_PATH="probe_results/imagenet-r/16mc-clip_answertotext/mlp/${FEATURE}/best_model.pt"
+  MODEL_PATH="probe_results/vqa-v2/mlp/${FEATURE}/best_model.pt"
 
-  srun python -m src.cli.train \
-    --data_path "$DATA_PATH" \
-    --features "$FEATURE" \
-    --model_type "$MODEL_TYPE" \
-    --num_epochs "$NUM_EPOCHS" \
-    --batch_size "$BATCH_SIZE" \
-    --output_dir "$OUTPUT_DIR" \
-    --no_class_weights \
+
+  srun python -m src.probe.eval_trained_probe \
+  --model-path "$MODEL_PATH" \
+  --data-path "$DATA_PATH" \
+  --output-base "$OUTPUT_DIR" \
+  --batch-size 32 \
+  --seed 42 \
+
 
 done

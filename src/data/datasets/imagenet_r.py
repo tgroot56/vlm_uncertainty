@@ -4,8 +4,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
 import random
 import string
-import os
-import json
 
 import torch
 
@@ -208,58 +206,6 @@ def build_mc_prompt(
 
 
 # ----------------------------
-# Debug dump helper (PROMPT + IMG)
-# ----------------------------
-
-def _debug_dump_first_sample(sample: Dict[str, Any]) -> None:
-    """
-    For inspection:
-    - prints the exact prompt to stdout
-    - saves image to quick_tests/outputs/image_r.png
-    - saves prompt/options metadata to quick_tests/outputs/imagenet_r_prompt.json
-    """
-    out_dir = os.path.join("quick_tests", "outputs")
-    os.makedirs(out_dir, exist_ok=True)
-
-    # 1) Print prompt
-    print("\n" + "=" * 100)
-    print("DEBUG (ImageNet-R) — First prepared sample prompt:")
-    print(sample["prompt"])
-    print("=" * 100 + "\n")
-
-    # 2) Save image
-    img_path = os.path.join(out_dir, "image_r.png")
-    try:
-        img = sample.get("image", None)
-        if img is not None:
-            # HF image objects are usually PIL Images; both .save and PIL.Image.Image work.
-            img.save(img_path)
-            print(f"Saved ImageNet-R debug image to: {img_path}")
-        else:
-            print("WARNING: sample['image'] is None, cannot save debug image.")
-    except Exception as e:
-        print(f"WARNING: Failed to save debug image to {img_path}: {e}")
-
-    # 3) Save JSON with prompt + options
-    json_path = os.path.join(out_dir, "imagenet_r_prompt.json")
-    payload = {
-        "idx": sample.get("idx"),
-        "gt_class": sample.get("gt_class"),
-        "gt_key": sample.get("gt_key"),
-        "gt_letter": sample.get("gt_letter"),  # present only for 4-way
-        "k_options": len(sample.get("option_map", {})) if isinstance(sample.get("option_map"), dict) else None,
-        "option_map": sample.get("option_map"),
-        "prompt": sample.get("prompt"),
-    }
-    try:
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, ensure_ascii=False)
-        print(f"Saved ImageNet-R prompt/options JSON to: {json_path}")
-    except Exception as e:
-        print(f"WARNING: Failed to save JSON to {json_path}: {e}")
-
-
-# ----------------------------
 # Split preparation (public)
 # ----------------------------
 
@@ -272,7 +218,6 @@ def prepare_imagenet_r_split(
     question: str = QUESTION_DEFAULT,
     use_clip_hard_negatives: bool = False,
     clip_cfg: Optional[ClipNegSamplerConfig] = None,
-    debug_dump: bool = False,
 ) -> List[Dict]:
     """
     Prepare ImageNet-R as K-way MC.
@@ -280,9 +225,6 @@ def prepare_imagenet_r_split(
 
     Returns dicts containing:
       idx, image, gt_class, prompt, option_map, gt_key (and gt_letter if k==4)
-
-    debug_dump:
-      If True, dumps the first prepared sample (prompt + image + json) to quick_tests/outputs/
     """
     if k_options < 2:
         raise ValueError("k_options must be >= 2")
@@ -325,17 +267,13 @@ def prepare_imagenet_r_split(
 
         mc = build_mc_prompt(question=question, gt_label=gt_class, options=options)
 
-        sample = {
-            "idx": idx,
-            "image": img,
-            "gt_class": gt_class,
-            **mc,
-        }
-
-        samples.append(sample)
-
-        # Only dump the first sample once
-        if debug_dump and idx == 0:
-            _debug_dump_first_sample(sample)
+        samples.append(
+            {
+                "idx": idx,
+                "image": img,
+                "gt_class": gt_class,
+                **mc,
+            }
+        )
 
     return samples

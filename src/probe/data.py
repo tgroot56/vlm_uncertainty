@@ -1,5 +1,6 @@
 """Data loading and preprocessing for probe training."""
 
+import os
 import torch
 import pickle
 from torch.utils.data import Dataset, DataLoader
@@ -9,16 +10,24 @@ import numpy as np
 
 class SupervisionDataset(Dataset):
     def __init__(self, data_path: str, feature_names: list[str], normalize: bool = True):
+        data_path = data_path.strip()
+        if not os.path.exists(data_path):
+            raise FileNotFoundError(
+                f"Supervision dataset not found at: {data_path!r}"
+            )
         payload = torch.load(data_path, map_location="cpu", weights_only=False)
 
         X_all = payload["X"].float()          # [N, D_total]
         y = payload["y"].float()              # [N]
         all_names = payload["feature_names"]  # length = number of feature blocks (24)
+        feature_dims = payload.get("feature_dims", None)
 
         # ---- infer per-block dimensions (works for your current feature set) ----
         def infer_dim(name: str) -> int:
             if name.startswith("vision_"):
                 return 1024
+            if name.startswith("visual_merged_"):
+                return 4096
             if name.startswith("lm_"):
                 return 4096
             if name.startswith("answer_gen_"):
@@ -28,8 +37,17 @@ class SupervisionDataset(Dataset):
         # Build name -> slice over X_all columns, in the order blocks were concatenated
         offset = 0
         name_to_slice = {}
-        for n in all_names:
-            d = infer_dim(n)
+        if feature_dims is not None:
+            if len(feature_dims) != len(all_names):
+                raise ValueError(
+                    f"feature_dims length mismatch: got {len(feature_dims)} dims for "
+                    f"{len(all_names)} feature names."
+                )
+            dims_iter = feature_dims
+        else:
+            dims_iter = [infer_dim(n) for n in all_names]
+
+        for n, d in zip(all_names, dims_iter):
             name_to_slice[n] = slice(offset, offset + d)
             offset += d
 

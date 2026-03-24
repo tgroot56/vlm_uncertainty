@@ -6,7 +6,7 @@ Trains probes on subsets of increasing size and plots test Brier score.
 
 Example:
   python -m utils.tables_and_plots.dataset_size_sweep \
-    --data-path outputs/supervised_datasets/vqa-v2/llava-hf/llava-1.5-7b-hf/run_cc1adbca16/supervision_dataset.pt \
+    --data-path /projects/prjs2014/vqa-v2/llava-hf/llava-1.5-7b-hf/run_cc1adbca16/supervision_dataset.pt \
     --output-dir probe_results/_plots/dataset_size_sweep \
     --seed 42
 

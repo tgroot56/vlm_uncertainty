@@ -16,6 +16,10 @@ class VQAv2Task:
     Assumes sample has: prompt, gt_answers (list), maybe gt_answer, question_id, image_id, dataset_id
     """
     dataset_id: str = "vqa-v2"
+    prediction_mode: str = "open_ended_vqa"
+
+    def dataset_load_kwargs(self, args: Any, device: Any) -> Dict[str, Any]:
+        return {}
 
     def predict_kwargs(self, sample: Dict[str, Any]) -> Dict[str, Any]:
         return {"prompt": sample["prompt"]}
@@ -27,16 +31,17 @@ class VQAv2Task:
         prediction_output: Tuple[Any, ...],
     ) -> Dict[str, Any]:
         """
-        Expects VQA output length 7:
-          (pred_answer, vision_hidden_states, lm_hidden_states, token_spans,
+        Expects VQA output length 8:
+          (pred_answer, vision_hidden_states, vision_merged_states, lm_hidden_states, token_spans,
            answer_hidden_states, gen_ids, gen_step_logits)
         """
-        if len(prediction_output) != 7:
-            raise ValueError(f"VQA-v2 expects predict_fn output length 7, got {len(prediction_output)}")
+        if len(prediction_output) != 8:
+            raise ValueError(f"VQA-v2 expects predict_fn output length 8, got {len(prediction_output)}")
 
         (
             pred_answer,
             vision_hidden_states,
+            vision_merged_states,
             lm_hidden_states,
             token_spans,
             answer_hidden_states,
@@ -64,6 +69,7 @@ class VQAv2Task:
             "score": float(corr.score),
             "row": row,
             "vision_hidden_states": vision_hidden_states,
+            "vision_merged_states": vision_merged_states,
             "lm_hidden_states": lm_hidden_states,
             "token_spans": token_spans,
             "answer_hidden_states": answer_hidden_states,

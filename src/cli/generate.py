@@ -9,9 +9,14 @@ End-to-end pipeline:
 - construct and save supervised UQ dataset
 """
 
-import argparse
-from ..pipelines.generate_dataset import run_generate_dataset
 import torch
+import argparse
+
+from ..storage_paths import configure_hf_cache_env, default_supervision_output_root
+
+configure_hf_cache_env()
+
+from ..pipelines.generate_dataset import run_generate_dataset
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -23,7 +28,7 @@ def parse_args():
         "--dataset",
         type=str,
         required=True,
-        help="Dataset identifier (e.g. vqa2, advqa, coqa)"
+        help="Dataset identifier (supported: pope, vqa-v2, coco-qa-vi, imagenet-r)"
     )
     parser.add_argument(
         "--vlm",
@@ -36,7 +41,7 @@ def parse_args():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="outputs/supervised_datasets",
+        default=default_supervision_output_root(),
         help="Root directory to store generated supervised datasets"
     )
     parser.add_argument(
@@ -44,6 +49,13 @@ def parse_args():
         type=int,
         default=42,
         help="Random seed for dataset splits and generation"
+    )
+    parser.add_argument(
+        "--dataset_split",
+        type=str,
+        default=None,
+        help="Optional dataset split override. Useful for datasets like POPE Full "
+             "with multiple splits such as adversarial, popular, or random."
     )
 
     # ---- Runtime control ----
@@ -57,6 +69,26 @@ def parse_args():
         "--verbose",
         action="store_true",
         help="Enable verbose logging"
+    )
+    parser.add_argument(
+        "--vision_features_only",
+        action="store_true",
+        help="Qwen-only mode: run only vision-encoder forward passes and save "
+             "a separate supervision_dataset_visual.pt using labels from an existing "
+             "supervision_dataset.pt for the same run."
+    )
+    parser.add_argument(
+        "--source_supervision_path",
+        type=str,
+        default=None,
+        help="Optional path to an existing supervision_dataset.pt to reuse labels/rows "
+             "when --vision_features_only is enabled. Defaults to the matching run folder."
+    )
+    parser.add_argument(
+        "--vision_batch_size",
+        type=int,
+        default=4,
+        help="Batch size for Qwen vision-only extraction. Only used with --vision_features_only."
     )
     # parser.add_argument(
     #     "--batch_size",
@@ -100,6 +132,18 @@ def parse_args():
         type=int, 
         default=None
     )
+    parser.add_argument(
+        "--all_lm_mean_layers",
+        type=str,
+        nargs="+",
+        default=None,
+        choices=["visual", "question", "answer"],
+        help=(
+            "LLaVA layer-sweep mode: extract mean-pooled LM features for every LM layer "
+            "for the selected spans. When set, the generator disables the standard default "
+            "feature set and stores only the requested per-layer mean features."
+        ),
+    )
 
 
 
@@ -119,4 +163,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

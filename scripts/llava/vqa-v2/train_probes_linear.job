@@ -1,0 +1,98 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=llava_train_vqa_v2_linear_probes
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=04:00:00
+#SBATCH --output=slurm_outputs/llava/vqa_v2_train_probes_linear_%A.out
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+cd "$HOME/vlm_uncertainty/" || exit 1
+
+source activate llava-experiments
+
+export VLM_UQ_STORAGE_ROOT="${VLM_UQ_STORAGE_ROOT:-/projects/prjs2014}"
+export VLM_UQ_USER_STORAGE_ROOT="${VLM_UQ_USER_STORAGE_ROOT:-$VLM_UQ_STORAGE_ROOT/$USER}"
+
+export HF_HOME="${HF_HOME:-$VLM_UQ_USER_STORAGE_ROOT/hf_home}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_datasets}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_transformers}"
+
+mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$TRANSFORMERS_CACHE"
+mkdir -p slurm_outputs/llava
+
+DATA_ROOT="${DATA_ROOT:-$VLM_UQ_STORAGE_ROOT}"
+VLM_PATH="${VLM_PATH:-llava-hf/llava-1.5-7b-hf}"
+MODEL_TYPE="${MODEL_TYPE:-linear}"
+NUM_EPOCHS="${NUM_EPOCHS:-20}"
+BATCH_SIZE="${BATCH_SIZE:-32}"
+SEED="${SEED:-42}"
+OUTPUT_DIR="${OUTPUT_DIR:-probe_results/llava/vqa-v2}"
+
+DATA_SEARCH_ROOT="$DATA_ROOT/vqa-v2/$VLM_PATH"
+DATA_PATH="${DATA_PATH:-$(find "$DATA_SEARCH_ROOT" -path '*/supervision_dataset.pt' | sort | tail -n 1)}"
+
+if [[ -z "$DATA_PATH" ]]; then
+    echo "Could not find supervision dataset under: $DATA_SEARCH_ROOT" >&2
+    exit 1
+fi
+
+mkdir -p "$OUTPUT_DIR"
+
+FEATURE_LIST=(
+  vision_mean_layer_12
+  vision_mean_layer_-1
+  lm_visual_mean_layer_16
+  lm_visual_mean_layer_-1
+  lm_visual_lasttok_layer_16
+  lm_visual_lasttok_layer_-1
+  lm_question_mean_layer_16
+  lm_question_mean_layer_-1
+  lm_question_lasttok_layer_16
+  lm_question_lasttok_layer_-1
+  lm_question_including_mean_layer_16
+  lm_question_including_mean_layer_-1
+  lm_question_including_lasttok_layer_16
+  lm_question_including_lasttok_layer_-1
+  lm_fullspan_mean_layer_16
+  lm_fullspan_mean_layer_-1
+  lm_fullspan_lasttok_layer_16
+  lm_fullspan_lasttok_layer_-1
+  lm_answer_mean_layer_16
+  lm_answer_mean_layer_-1
+  lm_answer_lasttok_layer_16
+  lm_answer_lasttok_layer_-1
+  answer_gen_negp_max
+  answer_gen_negp_min
+  answer_gen_negp_mean
+  answer_gen_negp_std
+  answer_gen_neglogp_mean
+  answer_gen_neglogp_std
+  answer_gen_entropy_max
+  answer_gen_entropy_min
+  answer_gen_entropy_mean
+  answer_gen_entropy_std
+)
+
+echo "Using DATA_PATH=$DATA_PATH"
+
+for FEATURE in "${FEATURE_LIST[@]}"; do
+  echo "============================================================"
+  echo "Running probe for feature: ${FEATURE}"
+  echo "============================================================"
+
+  srun python -m src.cli.train \
+    --data_path "$DATA_PATH" \
+    --features "$FEATURE" \
+    --model_type "$MODEL_TYPE" \
+    --num_epochs "$NUM_EPOCHS" \
+    --batch_size "$BATCH_SIZE" \
+    --output_dir "$OUTPUT_DIR" \
+    --seed "$SEED" \
+    --no_class_weights
+done

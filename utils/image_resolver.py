@@ -6,6 +6,13 @@ import json
 from typing import Any, Dict, Optional
 
 from datasets import load_dataset
+from src.storage_paths import (
+    configure_hf_cache_env,
+    hf_datasets_cache,
+    image_resolver_cache_dir,
+)
+
+configure_hf_cache_env()
 
 try:
     from PIL import Image
@@ -21,11 +28,16 @@ _VQA_DATASET = None
 _VQA_IMAGE_INDEX = None
 
 
-def _init_vqa(cache_dir: str = "cached_datasets/vqa_v2", split: str = "validation") -> None:
+def _default_vqa_cache_dir() -> str:
+    return os.path.join(image_resolver_cache_dir(), "vqa_v2")
+
+
+def _init_vqa(cache_dir: Optional[str] = None, split: str = "validation") -> None:
     global _VQA_DATASET, _VQA_IMAGE_INDEX
     if _VQA_DATASET is not None:
         return
 
+    cache_dir = cache_dir or _default_vqa_cache_dir()
     os.makedirs(cache_dir, exist_ok=True)
     index_path = os.path.join(cache_dir, f"image_id_to_idx_{split}.json")
 
@@ -33,6 +45,7 @@ def _init_vqa(cache_dir: str = "cached_datasets/vqa_v2", split: str = "validatio
         "HuggingFaceM4/VQAv2",
         split=split,
         trust_remote_code=True,
+        cache_dir=hf_datasets_cache(),
     )
 
     if os.path.exists(index_path):

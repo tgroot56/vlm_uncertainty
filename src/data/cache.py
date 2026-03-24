@@ -6,9 +6,13 @@ import hashlib
 import pickle
 from typing import Any, Dict, List, Optional
 
-DEFAULT_CACHE_DIR = "cached_datasets"
-CACHE_DIR = os.environ.get("VLM_UQ_PREP_CACHE", DEFAULT_CACHE_DIR)
-os.makedirs(CACHE_DIR, exist_ok=True)
+from src.storage_paths import configure_hf_cache_env, ensure_dir, prep_cache_dir
+
+configure_hf_cache_env()
+
+
+def _cache_dir() -> str:
+    return ensure_dir(prep_cache_dir())
 
 
 def _stable_kwargs_hash(dataset_kwargs: Optional[Dict[str, Any]]) -> str:
@@ -45,9 +49,9 @@ def cache_path(
     num_samples: int,
     dataset_kwargs: Optional[Dict[str, Any]],
 ) -> str:
-    os.makedirs(CACHE_DIR, exist_ok=True)
+    cache_dir = _cache_dir()
     return os.path.join(
-        CACHE_DIR,
+        cache_dir,
         f"prepared_{cache_key(dataset_id, split, seed_offset, num_samples, dataset_kwargs)}.pkl",
     )
 
@@ -119,15 +123,16 @@ def find_matching_cache(
     seed_offset: int,
     dataset_kwargs: Optional[Dict[str, Any]],
 ) -> Optional[List[Dict]]:
-    if not os.path.exists(CACHE_DIR):
+    cache_dir = _cache_dir()
+    if not os.path.exists(cache_dir):
         return None
 
     target_hash = _stable_kwargs_hash(dataset_kwargs)
 
-    for fname in os.listdir(CACHE_DIR):
+    for fname in os.listdir(cache_dir):
         if not fname.startswith("prepared_") or not fname.endswith(".pkl"):
             continue
-        path = os.path.join(CACHE_DIR, fname)
+        path = os.path.join(cache_dir, fname)
         print(f"Checking cache file: {fname} (this may take a while for large files)...")
         try:
             with open(path, "rb") as f:

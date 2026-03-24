@@ -537,12 +537,6 @@ def train_probe(
     checkpoint = torch.load(os.path.join(output_dir, "best_model.pt"), weights_only=False)
     model.load_state_dict(checkpoint["model_state_dict"])
 
-    feature_names = [
-        "lm_answer_mean_layer_16",
-        "lm_question_mean_layer_16",
-        "lm_visual_mean_layer_16",
-    ]
-
     test_metrics = evaluate(
         model,
         test_loader,
@@ -637,5 +631,4 @@ def train_probe(
     return model, history
 
     
-
 

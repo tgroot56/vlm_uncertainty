@@ -1,0 +1,83 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=qwen_fast_kernels
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=00:30:00
+#SBATCH --output=slurm_outputs/install_qwen_fast_kernels_%A.out
+
+set -euo pipefail
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+module load CUDA/12.8.0
+
+cd "$HOME/vlm_uncertainty/" || exit 1
+source activate llava-experiments
+
+export CUDA_HOME="${CUDA_HOME:-/sw/arch/RHEL9/EB_production/2025/software/CUDA/12.8.0}"
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+export MAX_JOBS="${SLURM_CPUS_PER_TASK:-9}"
+export PIP_NO_BUILD_ISOLATION=1
+
+PYTHON_BIN="/home/tgroot/.conda/envs/llava-experiments/bin/python"
+PIP_BIN="/home/tgroot/.conda/envs/llava-experiments/bin/pip"
+
+echo "Python: $($PYTHON_BIN --version)"
+echo "Pip: $($PIP_BIN --version)"
+echo "CUDA_HOME: $CUDA_HOME"
+echo "nvcc path: $(which nvcc)"
+nvcc --version
+
+echo
+echo "Upgrading build tooling in llava-experiments..."
+$PIP_BIN install --upgrade pip setuptools wheel packaging ninja numpy
+
+echo
+echo "Torch/CUDA environment summary:"
+$PYTHON_BIN - <<'PY'
+import torch
+print("torch", torch.__version__)
+print("torch.cuda", torch.version.cuda)
+print("cuda_available", torch.cuda.is_available())
+try:
+    import triton
+    print("triton", triton.__version__)
+except Exception as e:
+    print("triton import failed:", e)
+PY
+
+echo
+echo "Installing flash-linear-attention..."
+$PIP_BIN install --no-build-isolation flash-linear-attention
+
+echo
+echo "Installing causal-conv1d from PyPI..."
+if ! $PIP_BIN install --no-build-isolation causal-conv1d; then
+  echo
+  echo "PyPI install failed, trying GitHub fallback..."
+  $PIP_BIN install --no-build-isolation "git+https://github.com/Dao-AILab/causal-conv1d.git"
+fi
+
+echo
+echo "Verifying imports..."
+$PYTHON_BIN - <<'PY'
+results = {}
+for name in ("fla", "causal_conv1d"):
+    try:
+        __import__(name)
+        results[name] = "ok"
+    except Exception as e:
+        results[name] = f"FAILED: {e}"
+
+for key, value in results.items():
+    print(f"{key}: {value}")
+PY
+
+echo
+echo "Installed package versions:"
+$PIP_BIN show flash-linear-attention causal-conv1d || true

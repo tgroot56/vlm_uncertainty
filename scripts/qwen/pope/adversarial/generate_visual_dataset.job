@@ -1,0 +1,56 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --job-name=qwen_generate_pope_visual
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=12:00:00
+#SBATCH --output=slurm_outputs/qwen/pope_generate_visual_%A.out
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+cd "$HOME/vlm_uncertainty/" || exit 1
+
+source activate llava-experiments
+
+export VLM_UQ_STORAGE_ROOT="${VLM_UQ_STORAGE_ROOT:-/projects/prjs2014}"
+export VLM_UQ_USER_STORAGE_ROOT="${VLM_UQ_USER_STORAGE_ROOT:-$VLM_UQ_STORAGE_ROOT/$USER}"
+
+export HF_HOME="${HF_HOME:-$VLM_UQ_USER_STORAGE_ROOT/hf_home}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_datasets}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_transformers}"
+
+mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$TRANSFORMERS_CACHE"
+
+export VLM_UQ_PREP_CACHE="${VLM_UQ_PREP_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/vlm_uq_prepared_cache}"
+mkdir -p "$VLM_UQ_PREP_CACHE"
+mkdir -p slurm_outputs/qwen
+
+VLM_ID="${VLM_ID:-Qwen/Qwen3.5-9B}"
+DATASET_SPLIT="${DATASET_SPLIT:-adversarial}"
+OUTPUT_DIR="${OUTPUT_DIR:-$VLM_UQ_STORAGE_ROOT/qwen}"
+SEED="${SEED:-42}"
+DEVICE="${DEVICE:-cuda}"
+VISION_BATCH_SIZE="${VISION_BATCH_SIZE:-4}"
+SOURCE_SUPERVISION_PATH="${SOURCE_SUPERVISION_PATH:-/projects/prjs2014/qwen/pope/adversarial/Qwen/Qwen3.5-9B/run_0ce7355dd2/supervision_dataset.pt}"
+
+CMD=(
+  python -u -m src.cli.generate
+  --vlm "$VLM_ID"
+  --dataset pope
+  --dataset_split "$DATASET_SPLIT"
+  --output_dir "$OUTPUT_DIR"
+  --seed "$SEED"
+  --device "$DEVICE"
+  --vision_batch_size "$VISION_BATCH_SIZE"
+  --vision_features_only
+)
+
+if [[ -n "$SOURCE_SUPERVISION_PATH" ]]; then
+  CMD+=(--source_supervision_path "$SOURCE_SUPERVISION_PATH")
+fi
+
+srun "${CMD[@]}"

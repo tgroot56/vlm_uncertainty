@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Dict, List, Optional, Any
 
 from .registry import get_dataset_spec
@@ -55,7 +57,7 @@ def load_dataset_prepared(
         if cached_any is not None:
             return cached_any
 
-    ds = load_hf_dataset(spec.hf_name)
+    ds = load_hf_dataset(spec.hf_name, spec.hf_config)
     split_obj = ds[split]
 
     # Exact cache check (only when max_samples is None, matching your old behavior)

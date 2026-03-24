@@ -7,6 +7,10 @@ import string
 
 import torch
 
+from src.storage_paths import configure_hf_cache_env
+
+configure_hf_cache_env()
+
 QUESTION_DEFAULT = "Which object is shown in the image?"
 
 
@@ -84,6 +88,27 @@ class ClipHardNegativeSampler:
         self._name_to_idx: Dict[str, int] = {n: i for i, n in enumerate(self.class_names)}
         self._gt_text_emb_cache: Dict[str, torch.Tensor] = {}
 
+    def _coerce_feature_tensor(self, features: Any, *, kind: str) -> torch.Tensor:
+        """
+        Handle CLIP API differences across transformers versions.
+
+        Older versions returned a Tensor directly from get_text_features/get_image_features.
+        Newer versions return a model output object whose projected embedding lives on
+        pooler_output (for CLIPModel) or *_embeds (for projection wrappers).
+        """
+        if isinstance(features, torch.Tensor):
+            return features
+
+        for attr_name in ("text_embeds", "image_embeds", "pooler_output"):
+            value = getattr(features, attr_name, None)
+            if isinstance(value, torch.Tensor):
+                return value
+
+        raise TypeError(
+            f"Unsupported CLIP {kind} feature output type: {type(features)!r}. "
+            "Expected a Tensor or an output object containing projected embeddings."
+        )
+
     def _ensure_clip_loaded(self) -> None:
         if self._model is not None and self._processor is not None and self._text_emb is not None:
             return
@@ -104,7 +129,8 @@ class ClipHardNegativeSampler:
         with torch.no_grad():
             inputs = self._processor(text=texts, return_tensors="pt", padding=True, truncation=True)
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            text_features = self._model.get_text_features(**inputs)  # [C, D]
+            text_features = self._model.get_text_features(**inputs)
+            text_features = self._coerce_feature_tensor(text_features, kind="text")
             text_features = text_features.to(self.cfg.dtype)
             text_features = torch.nn.functional.normalize(text_features, dim=-1)
         self._text_emb = text_features
@@ -116,7 +142,8 @@ class ClipHardNegativeSampler:
 
         inputs = self._processor(images=pil_image, return_tensors="pt")
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        img_feat = self._model.get_image_features(**inputs)  # [1, D]
+        img_feat = self._model.get_image_features(**inputs)
+        img_feat = self._coerce_feature_tensor(img_feat, kind="image")
         img_feat = img_feat.to(self.cfg.dtype)
         img_feat = torch.nn.functional.normalize(img_feat, dim=-1)
         return img_feat[0]  # [D]
@@ -190,10 +217,9 @@ def build_mc_prompt(
     gt_key = next(k for k, v in option_map.items() if v == gt_label)
 
     prompt = (
-        f"{question}\n\n"
-        "Choices:\n"
+        f"{question}\n"
         + "\n".join(f"{k}. {v}" for k, v in option_map.items())
-        + f"\n\nAnswer with only one of: {', '.join(keys)}."
+        + f"\nReply with only one of: {'/'.join(keys)}."
     )
 
     out = {"prompt": prompt, "option_map": option_map, "gt_key": gt_key}
@@ -229,12 +255,12 @@ def prepare_imagenet_r_split(
     if k_options < 2:
         raise ValueError("k_options must be >= 2")
 
-    if max_samples is not None:
-        split_obj = split_obj.select(range(min(max_samples, len(split_obj))))
-
     all_class_names = sorted(set(split_obj["class_name"]))
     if k_options > len(all_class_names):
         raise ValueError(f"k_options={k_options} > num_classes={len(all_class_names)}")
+
+    if max_samples is not None:
+        split_obj = split_obj.select(range(min(max_samples, len(split_obj))))
 
     clip_sampler: Optional[ClipHardNegativeSampler] = None
     if use_clip_hard_negatives:

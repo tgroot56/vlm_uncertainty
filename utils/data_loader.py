@@ -16,10 +16,13 @@ import random
 
 from datasets import load_dataset, DownloadConfig
 import aiohttp
+from src.storage_paths import configure_hf_cache_env, ensure_dir, hf_datasets_cache, prep_cache_dir
 
-DEFAULT_CACHE_DIR = "cached_datasets"
-CACHE_DIR = os.environ.get("VLM_UQ_PREP_CACHE", DEFAULT_CACHE_DIR)
-os.makedirs(CACHE_DIR, exist_ok=True)
+configure_hf_cache_env()
+
+
+def _cache_dir() -> str:
+    return ensure_dir(prep_cache_dir())
 
 LETTERS = ["A", "B", "C", "D"]
 
@@ -52,7 +55,12 @@ def load_hf_dataset(hf_name: str):
         # these kwargs go to fsspec HTTPFileSystem -> aiohttp.ClientSession
         storage_options={"client_kwargs": {"timeout": timeout}}
     )
-    return load_dataset(hf_name, trust_remote_code=True, download_config=dl_cfg)
+    return load_dataset(
+        hf_name,
+        trust_remote_code=True,
+        download_config=dl_cfg,
+        cache_dir=hf_datasets_cache(),
+    )
 
 
 
@@ -62,8 +70,8 @@ def _cache_key(dataset_id: str, split: str, seed_offset: int, num_samples: int) 
 
 
 def _cache_path(dataset_id: str, split: str, seed_offset: int, num_samples: int) -> str:
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    return os.path.join(CACHE_DIR, f"prepared_{_cache_key(dataset_id, split, seed_offset, num_samples)}.pkl")
+    cache_dir = _cache_dir()
+    return os.path.join(cache_dir, f"prepared_{_cache_key(dataset_id, split, seed_offset, num_samples)}.pkl")
 
 
 def _load_cache(dataset_id: str, split: str, seed_offset: int, num_samples: int) -> Optional[List[Dict]]:
@@ -116,13 +124,14 @@ def _find_matching_cache(dataset_id: str, split: str, seed_offset: int) -> Optio
     regardless of num_samples. Useful when you don't want to load HF dataset just to
     learn split size.
     """
-    if not os.path.exists(CACHE_DIR):
+    cache_dir = _cache_dir()
+    if not os.path.exists(cache_dir):
         return None
 
-    for fname in os.listdir(CACHE_DIR):
+    for fname in os.listdir(cache_dir):
         if not fname.startswith("prepared_") or not fname.endswith(".pkl"):
             continue
-        path = os.path.join(CACHE_DIR, fname)
+        path = os.path.join(cache_dir, fname)
         try:
             with open(path, "rb") as f:
                 payload = pickle.load(f)

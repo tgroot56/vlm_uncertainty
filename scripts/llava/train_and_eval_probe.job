@@ -1,0 +1,50 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=train_eval_probe
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=00:50:00
+#SBATCH --output=slurm_outputs/train_eval_probe_%A.out
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+# Navigate to the project directory
+cd $HOME/vlm_uncertainty/
+
+source activate llava-experiments
+
+# Load HF datasets and models on project storage
+export VLM_UQ_STORAGE_ROOT="${VLM_UQ_STORAGE_ROOT:-/projects/prjs2014}"
+export VLM_UQ_USER_STORAGE_ROOT="${VLM_UQ_USER_STORAGE_ROOT:-$VLM_UQ_STORAGE_ROOT/$USER}"
+
+export HF_HOME="${HF_HOME:-$VLM_UQ_USER_STORAGE_ROOT/hf_home}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_datasets}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_transformers}"
+
+mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$TRANSFORMERS_CACHE"
+
+#set variables
+DATA_PATH="$VLM_UQ_STORAGE_ROOT/imagenet_r_16mc/imagenet-r/llava-hf/llava-1.5-7b-hf/run_035f83a53c/supervision_dataset.pt"
+# DATA_PATH="$VLM_UQ_STORAGE_ROOT/vqa-v2/llava-hf/llava-1.5-7b-hf/run_cc1adbca16/supervision_dataset.pt"
+FEATURES="lm_answer_mean_layer_16 lm_question_mean_layer_16 lm_visual_mean_layer_16"
+MODEL_TYPE="component_attention_mlp"
+OUTPUT_DIR="probe_results/imagenet-r/16mc-clip"
+HIDDEN_DIMS="256 128"
+NUM_EPOCHS=100
+BATCH_SIZE=32
+NUM_COMPONENTS=3
+
+srun python -u -m src.cli.train \
+  --data_path $DATA_PATH \
+  --features $FEATURES \
+  --model_type $MODEL_TYPE \
+  --hidden_dims $HIDDEN_DIMS \
+  --num_epochs $NUM_EPOCHS \
+  --batch_size $BATCH_SIZE \
+  --output_dir $OUTPUT_DIR \
+  --no_class_weights \
+  --num_components $NUM_COMPONENTS

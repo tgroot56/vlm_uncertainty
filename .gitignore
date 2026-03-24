@@ -20,12 +20,6 @@ slurm_outputs/
 # Ignore everything inside probe_results
 probe_results/**
 
-# Re-allow directories (so Git can descend into them)
-!probe_results/**/
-
-# Re-allow only results CSV files
-!probe_results/**/results_*.csv
-
 
 # Tests
 quick_tests/

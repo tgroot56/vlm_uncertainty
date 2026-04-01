@@ -47,7 +47,7 @@ DATASET_CONFIGS = {
     "qwen/imagenet-r": {
         "true": Path("probe_results/qwen/imagenet-r"),
         "shuffle": Path("probe_results/qwen/imagenet-r/baselines"),
-        "no_skill_brier": PLACEHOLDER_NO_SKILL_BRIER,
+        "no_skill_brier": 0.043884001672267914,
     },
     "qwen/vqa-v2": {
         "true": Path("probe_results/qwen/vqa-v2"),

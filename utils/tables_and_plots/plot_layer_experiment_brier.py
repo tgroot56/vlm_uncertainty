@@ -21,18 +21,21 @@ FEATURE_PATTERNS: Dict[str, re.Pattern[str]] = {
     "lm_visual_mean": re.compile(r"^lm_visual_mean_layer_(\d+)$"),
     "lm_question_mean": re.compile(r"^lm_question_mean_layer_(\d+)$"),
     "lm_answer_mean": re.compile(r"^lm_answer_mean_layer_(\d+)$"),
+    "lm_fullspan_lasttok": re.compile(r"^lm_fullspan_lasttok_layer_(\d+)$"),
 }
 
 SERIES_LABELS = {
     "lm_visual_mean": "Visual span mean",
     "lm_question_mean": "Question span mean",
     "lm_answer_mean": "Answer span mean",
+    "lm_fullspan_lasttok": "Full span last token",
 }
 
 SERIES_COLORS = {
     "lm_visual_mean": "#0f766e",
     "lm_question_mean": "#c2410c",
     "lm_answer_mean": "#4338ca",
+    "lm_fullspan_lasttok": "#b91c1c",
 }
 
 
@@ -113,8 +116,9 @@ def plot_layer_scores(
     *,
     title: str,
     output_pdf: Path,
-) -> None:
+) -> Path:
     output_pdf.parent.mkdir(parents=True, exist_ok=True)
+    output_png = output_pdf.with_suffix(".png")
 
     fig, ax = plt.subplots(figsize=(10.5, 6.5))
 
@@ -168,7 +172,9 @@ def plot_layer_scores(
 
     fig.tight_layout()
     fig.savefig(output_pdf, format="pdf", bbox_inches="tight")
+    fig.savefig(output_png, format="png", dpi=300, bbox_inches="tight")
     plt.close(fig)
+    return output_png
 
 
 def print_summary(layer_scores: Dict[str, List[Tuple[int, float, Path]]]) -> None:
@@ -185,9 +191,10 @@ def print_summary(layer_scores: Dict[str, List[Tuple[int, float, Path]]]) -> Non
 def main() -> None:
     args = parse_args()
     layer_scores = collect_layer_scores(args.results_root)
-    plot_layer_scores(layer_scores, title=args.title, output_pdf=args.output_pdf)
+    output_png = plot_layer_scores(layer_scores, title=args.title, output_pdf=args.output_pdf)
     print_summary(layer_scores)
     print(f"[saved] {args.output_pdf}")
+    print(f"[saved] {output_png}")
 
 
 if __name__ == "__main__":

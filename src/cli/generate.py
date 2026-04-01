@@ -137,11 +137,13 @@ def parse_args():
         type=str,
         nargs="+",
         default=None,
-        choices=["visual", "question", "answer"],
+        choices=["visual", "question", "answer", "fullspan_lasttok"],
         help=(
-            "LLaVA layer-sweep mode: extract mean-pooled LM features for every LM layer "
-            "for the selected spans. When set, the generator disables the standard default "
-            "feature set and stores only the requested per-layer mean features."
+            "Layer-sweep mode: extract per-layer LM features for the selected families. "
+            "'visual', 'question', and 'answer' store mean-pooled span features for every LM layer. "
+            "'fullspan_lasttok' stores the last-token feature of the full span for every LM layer. "
+            "When set, the generator disables the standard default feature set and stores "
+            "only the requested per-layer features."
         ),
     )
 

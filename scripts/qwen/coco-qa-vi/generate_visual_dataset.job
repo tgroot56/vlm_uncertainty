@@ -5,7 +5,7 @@
 #SBATCH --job-name=qwen_generate_coco_qa_vi_visual
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=70:00:00
+#SBATCH --time=60:00:00
 #SBATCH --output=slurm_outputs/qwen/coco_qa_vi_generate_visual_%A.out
 
 module purge
@@ -34,7 +34,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-$VLM_UQ_STORAGE_ROOT/qwen}"
 SEED="${SEED:-42}"
 DEVICE="${DEVICE:-cuda}"
 VISION_BATCH_SIZE="${VISION_BATCH_SIZE:-4}"
-SOURCE_SUPERVISION_PATH="${SOURCE_SUPERVISION_PATH:-}"
+SOURCE_SUPERVISION_PATH="${SOURCE_SUPERVISION_PATH:-/projects/prjs2014/qwen/coco-qa-vi/Qwen/Qwen3.5-9B/run_4c52820771/supervision_dataset.pt}"
 
 CMD=(
   python -u -m src.cli.generate

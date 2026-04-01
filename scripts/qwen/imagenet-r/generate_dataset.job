@@ -5,7 +5,7 @@
 #SBATCH --job-name=qwen_generate_imagenet_r
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=00:30:00
+#SBATCH --time=70:00:00
 #SBATCH --output=slurm_outputs/qwen/imagenet_r_generate_%A.out
 
 module purge
@@ -45,7 +45,7 @@ CMD=(
   --k_options "$K_OPTIONS"
   --clip_negatives \
   --clip_mode gt_to_text \
-  --max_samples 100 
+  --max_samples 10000 
   )
 
 if [[ "${CLIP_NEGATIVES:-0}" == "1" ]]; then
@@ -59,5 +59,13 @@ fi
 if [[ -n "${CLIP_TOP_POOL:-}" ]]; then
   CMD+=(--clip_top_pool "$CLIP_TOP_POOL")
 fi
+
+# if [[ -n "${MAX_SAMPLES:-}" ]]; then
+#   CMD+=(--max_samples "$MAX_SAMPLES")
+# fi
+
+# if [[ "${VERBOSE:-0}" == "1" ]]; then
+#   CMD+=(--verbose)
+# fi
 
 srun "${CMD[@]}"

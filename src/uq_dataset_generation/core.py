@@ -75,6 +75,7 @@ def _run_id_from_config(cfg: SupervisionGenConfig) -> str:
             "lm_visual_all_layers_mean": cfg.use_lm_visual_all_layers_mean,
             "lm_question_all_layers_mean": cfg.use_lm_question_all_layers_mean,
             "lm_answer_all_layers_mean": cfg.use_lm_answer_all_layers_mean,
+            "lm_fullspan_all_layers_lasttoken": cfg.use_lm_fullspan_all_layers_lasttoken,
         },
     }
     s = json.dumps(key, sort_keys=True).encode()
@@ -971,6 +972,19 @@ def generate_supervised_uq_dataset(
             if cfg.use_lm_fullspan_final:
                 f = _extract_lm_mean_pool(lm_hidden_states, -1, fs0, fs1, name="lm_final_fullspan_-1")
                 _append_feature_block(per_sample_feats, per_sample_names, per_sample_dims, f, "lm_fullspan_mean_layer_-1")
+
+            if cfg.use_lm_fullspan_all_layers_lasttoken:
+                for layer_idx in all_lm_indices:
+                    f = _extract_lm_last_token(
+                        lm_hidden_states, layer_idx, fs0, fs1, name=f"lm_fullspan_all_layers_lasttok_{layer_idx}"
+                    )
+                    _append_feature_block(
+                        per_sample_feats,
+                        per_sample_names,
+                        per_sample_dims,
+                        f,
+                        f"lm_fullspan_lasttok_layer_{layer_idx}",
+                    )
 
             if cfg.use_lm_fullspan_middle_lasttoken:
                 f = _extract_lm_last_token(lm_hidden_states, mid_lm, fs0, fs1, name=f"lm_mid_fullspan_lasttok_{mid_lm}")

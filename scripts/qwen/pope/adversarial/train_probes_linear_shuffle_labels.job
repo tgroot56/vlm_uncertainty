@@ -35,8 +35,9 @@ BATCH_SIZE="${BATCH_SIZE:-32}"
 SEED="${SEED:-42}"
 OUTPUT_DIR="${OUTPUT_DIR:-probe_results/qwen/pope/${DATASET_SPLIT}/baselines}"
 
-DATA_SEARCH_ROOT="$DATA_ROOT/pope/$DATASET_SPLIT/$VLM_PATH"
-DATA_PATH="${DATA_PATH:-$(find "$DATA_SEARCH_ROOT" -path '*/supervision_dataset.pt' | sort | tail -n 1)}"
+# DATA_SEARCH_ROOT="$DATA_ROOT/pope/$DATASET_SPLIT/$VLM_PATH"
+# DATA_PATH="${DATA_PATH:-$(find "$DATA_SEARCH_ROOT" -path '*/supervision_dataset.pt' | sort | tail -n 1)}"
+DATA_PATH="${DATA_PATH:-/projects/prjs2014/qwen/pope/adversarial/Qwen/Qwen3.5-9B/run_da62828780/supervision_dataset_visual.pt}"
 
 if [[ -z "$DATA_PATH" ]]; then
     echo "Could not find supervision dataset under: $DATA_SEARCH_ROOT" >&2

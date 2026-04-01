@@ -34,8 +34,10 @@ BATCH_SIZE="${BATCH_SIZE:-32}"
 SEED="${SEED:-42}"
 OUTPUT_DIR="${OUTPUT_DIR:-probe_results/qwen/imagenet-r}"
 
-DATA_SEARCH_ROOT="$DATA_ROOT/imagenet-r/$VLM_PATH"
-DATA_PATH="${DATA_PATH:-$(find "$DATA_SEARCH_ROOT" -path '*/supervision_dataset.pt' | sort | tail -n 1)}"
+# DATA_SEARCH_ROOT="$DATA_ROOT/imagenet-r/$VLM_PATH"
+# DATA_PATH="${DATA_PATH:-$(find "$DATA_SEARCH_ROOT" -path '*/supervision_dataset.pt' | sort | tail -n 1)}"
+
+DATA_PATH="${DATA_PATH:-/projects/prjs2014/qwen/imagenet-r/Qwen/Qwen3.5-9B/run_ff6c0d7339/supervision_dataset.pt}"
 
 if [[ -z "$DATA_PATH" ]]; then
     echo "Could not find supervision dataset under: $DATA_SEARCH_ROOT" >&2

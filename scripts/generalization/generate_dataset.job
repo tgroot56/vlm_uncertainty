@@ -1,0 +1,79 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=generalization_build
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=00:30:00
+#SBATCH --output=slurm_outputs/generalization/generate_dataset_%A.out
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+cd "$HOME/vlm_uncertainty/" || exit 1
+
+source activate llava-experiments
+
+export VLM_UQ_STORAGE_ROOT="${VLM_UQ_STORAGE_ROOT:-/projects/prjs2014}"
+export VLM_UQ_USER_STORAGE_ROOT="${VLM_UQ_USER_STORAGE_ROOT:-$VLM_UQ_STORAGE_ROOT/$USER}"
+
+export HF_HOME="${HF_HOME:-$VLM_UQ_USER_STORAGE_ROOT/hf_home}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_datasets}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_transformers}"
+
+mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$TRANSFORMERS_CACHE"
+mkdir -p slurm_outputs/generalization
+
+MODEL_NAME="${MODEL_NAME:-qwen}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/projects/prjs2014/probe_results}"
+FEATURE_NAMES="${FEATURE_NAMES:-lm_answer_mean_layer_16 answer_gen_entropy_mean lm_fullspan_lasttok_layer_16}"
+MAX_PER_DATASET="${MAX_PER_DATASET:-3000}"
+SAMPLING_SEED="${SAMPLING_SEED:-42}"
+SPLIT_SEED="${SPLIT_SEED:-42}"
+BINARIZE_THRESHOLD="${BINARIZE_THRESHOLD:-1.0}"
+TRAIN_FRACTION="${TRAIN_FRACTION:-0.85}"
+VAL_FRACTION="${VAL_FRACTION:-0.15}"
+MAIN_PROBE_SPLIT_SEED="${MAIN_PROBE_SPLIT_SEED:-42}"
+MAIN_PROBE_TRAIN_FRACTION="${MAIN_PROBE_TRAIN_FRACTION:-0.7}"
+MAIN_PROBE_VAL_FRACTION="${MAIN_PROBE_VAL_FRACTION:-0.15}"
+
+CMD=(
+  python -u -m src.cli.run_generalization
+  build-dataset
+  --model_name "$MODEL_NAME"
+  --output_root "$OUTPUT_ROOT"
+  --max_per_dataset "$MAX_PER_DATASET"
+  --sampling_seed "$SAMPLING_SEED"
+  --split_seed "$SPLIT_SEED"
+  --binarize_threshold "$BINARIZE_THRESHOLD"
+  --train_fraction "$TRAIN_FRACTION"
+  --val_fraction "$VAL_FRACTION"
+  --main_probe_split_seed "$MAIN_PROBE_SPLIT_SEED"
+  --main_probe_train_fraction "$MAIN_PROBE_TRAIN_FRACTION"
+  --main_probe_val_fraction "$MAIN_PROBE_VAL_FRACTION"
+)
+
+if [[ -n "${FEATURE_NAME:-}" ]]; then
+  CMD+=(--feature_name "$FEATURE_NAME")
+else
+  # shellcheck disable=SC2206
+  FEATURE_NAME_ARRAY=($FEATURE_NAMES)
+  CMD+=(--feature_names "${FEATURE_NAME_ARRAY[@]}")
+fi
+
+if [[ -n "${VQA_SOURCE_PATH:-}" ]]; then
+  CMD+=(--vqa_source_path "$VQA_SOURCE_PATH")
+fi
+if [[ -n "${COCO_SOURCE_PATH:-}" ]]; then
+  CMD+=(--coco_source_path "$COCO_SOURCE_PATH")
+fi
+if [[ -n "${IMAGENET_R_SOURCE_PATH:-}" ]]; then
+  CMD+=(--imagenet_r_source_path "$IMAGENET_R_SOURCE_PATH")
+fi
+if [[ -n "${POPE_SOURCE_PATH:-}" ]]; then
+  CMD+=(--pope_source_path "$POPE_SOURCE_PATH")
+fi
+
+srun "${CMD[@]}"

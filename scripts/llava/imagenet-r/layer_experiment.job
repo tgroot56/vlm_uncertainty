@@ -2,11 +2,11 @@
 
 #SBATCH --partition=gpu_a100
 #SBATCH --gpus=1
-#SBATCH --job-name=llava_pope_random_layers
+#SBATCH --job-name=llava_imagenet_r_layers
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=36:00:00
-#SBATCH --output=slurm_outputs/llava/pope_random_layer_experiment_%A.out
+#SBATCH --output=slurm_outputs/llava/imagenet_r_layer_experiment_%A.out
 
 module purge
 module load 2025
@@ -31,15 +31,18 @@ mkdir -p slurm_outputs/llava
 
 LAYER_EXPERIMENT_ROOT="${LAYER_EXPERIMENT_ROOT:-/projects/prjs2014/llava/layer_experiment}"
 VLM_ID="${VLM_ID:-llava-hf/llava-1.5-7b-hf}"
-DATASET_SPLIT="${DATASET_SPLIT:-random}"
 DEVICE="${DEVICE:-cuda}"
 SEED="${SEED:-42}"
 MAX_SAMPLES="${MAX_SAMPLES:-}"
+K_OPTIONS="${K_OPTIONS:-16}"
+USE_CLIP_NEGATIVES="${USE_CLIP_NEGATIVES:-1}"
+CLIP_MODE="${CLIP_MODE:-gt_to_text}"
+CLIP_TOP_POOL="${CLIP_TOP_POOL:-30}"
 
 MODEL_TYPE="${MODEL_TYPE:-mlp}"
 NUM_EPOCHS="${NUM_EPOCHS:-20}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
-TRAIN_OUTPUT_DIR="${TRAIN_OUTPUT_DIR:-$LAYER_EXPERIMENT_ROOT/probe_results/pope/${DATASET_SPLIT}/${MODEL_TYPE}_layer_comparison}"
+TRAIN_OUTPUT_DIR="${TRAIN_OUTPUT_DIR:-$LAYER_EXPERIMENT_ROOT/probe_results/imagenet-r/${MODEL_TYPE}_layer_comparison}"
 LAYER_FEATURE_FAMILIES="${LAYER_FEATURE_FAMILIES:-visual question answer fullspan_lasttok}"
 
 mkdir -p "$LAYER_EXPERIMENT_ROOT" "$TRAIN_OUTPUT_DIR"
@@ -47,18 +50,23 @@ mkdir -p "$LAYER_EXPERIMENT_ROOT" "$TRAIN_OUTPUT_DIR"
 GENERATE_ARGS=(
   python -u -m src.cli.generate
   --vlm "$VLM_ID"
-  --dataset pope
-  --dataset_split "$DATASET_SPLIT"
+  --dataset imagenet-r
   --output_dir "$LAYER_EXPERIMENT_ROOT"
   --seed "$SEED"
   --device "$DEVICE"
+  --k_options "$K_OPTIONS"
+  --clip_mode "$CLIP_MODE"
+  --clip_top_pool "$CLIP_TOP_POOL"
   --all_lm_mean_layers
-  # --verbose
 )
 
 # shellcheck disable=SC2206
 LAYER_FEATURE_FAMILY_ARRAY=($LAYER_FEATURE_FAMILIES)
 GENERATE_ARGS+=("${LAYER_FEATURE_FAMILY_ARRAY[@]}")
+
+if [[ "$USE_CLIP_NEGATIVES" == "1" ]]; then
+  GENERATE_ARGS+=(--clip_negatives)
+fi
 
 if [[ -n "$MAX_SAMPLES" ]]; then
   GENERATE_ARGS+=(--max_samples "$MAX_SAMPLES")
@@ -69,14 +77,16 @@ echo "Generating layer-sweep UQ dataset"
 echo "============================================================"
 echo "Output root: $LAYER_EXPERIMENT_ROOT"
 echo "Model: $VLM_ID"
-echo "Dataset: pope/$DATASET_SPLIT"
+echo "Dataset: imagenet-r"
+echo "K options: $K_OPTIONS"
+echo "Use CLIP negatives: $USE_CLIP_NEGATIVES"
 
 GENERATION_MARKER="$(mktemp)"
 touch "$GENERATION_MARKER"
 
 srun "${GENERATE_ARGS[@]}"
 
-DATA_SEARCH_ROOT="$LAYER_EXPERIMENT_ROOT/pope/$DATASET_SPLIT/$VLM_ID"
+DATA_SEARCH_ROOT="$LAYER_EXPERIMENT_ROOT/imagenet-r/$VLM_ID"
 
 if [[ -z "${DATA_PATH:-}" ]]; then
   DATA_PATH="$(find "$DATA_SEARCH_ROOT" -path '*/supervision_dataset.pt' -newer "$GENERATION_MARKER" -print | sort | tail -n 1)"

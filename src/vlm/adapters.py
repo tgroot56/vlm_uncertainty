@@ -137,7 +137,10 @@ def prepare_inputs(
                 template_kwargs["enable_thinking"] = False
 
             inputs = processor.apply_chat_template(messages, **template_kwargs)
-            return _move_batch_to_device(inputs, device)
+            inputs = _move_batch_to_device(inputs, device)
+            if adapter.family == "qwen":
+                inputs = _strip_qwen_trailing_thinking_tokens(inputs)
+            return inputs
         except TypeError:
             inputs = processor.apply_chat_template(
                 messages,
@@ -146,7 +149,10 @@ def prepare_inputs(
                 return_dict=True,
                 return_tensors="pt",
             )
-            return _move_batch_to_device(inputs, device)
+            inputs = _move_batch_to_device(inputs, device)
+            if adapter.family == "qwen":
+                inputs = _strip_qwen_trailing_thinking_tokens(inputs)
+            return inputs
         except Exception:
             text_messages = [{
                 "role": "user",
@@ -167,6 +173,8 @@ def prepare_inputs(
                     add_generation_prompt=True,
                     tokenize=False,
                 )
+            if adapter.family == "qwen":
+                text_prompt = _strip_qwen_trailing_thinking_text(text_prompt)
             inputs = processor(text=[text_prompt], images=[image], return_tensors="pt")
             return _move_batch_to_device(inputs, device)
 
@@ -581,6 +589,42 @@ def _extract_qwen_visual_tensor_inputs(batch: Dict[str, torch.Tensor]) -> Option
         "pixel_values": pixel_values,
         "image_grid_thw": image_grid_thw,
     }
+
+
+def _strip_qwen_trailing_thinking_text(text_prompt: str) -> str:
+    think_markers = ("\n<think>\n</think>\n\n", "\n<think>\n")
+    for marker in think_markers:
+        if text_prompt.endswith(marker):
+            return text_prompt[: -len(marker)]
+    return text_prompt
+
+
+def _strip_qwen_trailing_thinking_tokens(batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    input_ids = batch.get("input_ids")
+    if input_ids is None or input_ids.ndim != 2 or input_ids.shape[0] != 1:
+        return batch
+
+    tokens = input_ids[0]
+    think_positions = (tokens == 248068).nonzero(as_tuple=False)
+    if think_positions.numel() == 0:
+        return batch
+
+    last_think_idx = int(think_positions[-1].item())
+    trim_idx = last_think_idx
+    trimmed_batch: Dict[str, torch.Tensor] = {}
+    seq_len = tokens.shape[0]
+
+    for key, value in batch.items():
+        if not isinstance(value, torch.Tensor):
+            trimmed_batch[key] = value
+            continue
+
+        if value.ndim >= 2 and value.shape[0] == input_ids.shape[0] and value.shape[1] == seq_len:
+            trimmed_batch[key] = value[:, :trim_idx, ...]
+        else:
+            trimmed_batch[key] = value
+
+    return trimmed_batch
 
 
 def _prepare_qwen_visual_only_single_inputs(

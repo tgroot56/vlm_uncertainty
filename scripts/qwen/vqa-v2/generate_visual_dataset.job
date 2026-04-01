@@ -34,7 +34,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-$VLM_UQ_STORAGE_ROOT/qwen}"
 SEED="${SEED:-42}"
 DEVICE="${DEVICE:-cuda}"
 VISION_BATCH_SIZE="${VISION_BATCH_SIZE:-4}"
-SOURCE_SUPERVISION_PATH="${SOURCE_SUPERVISION_PATH:-}"
+SOURCE_SUPERVISION_PATH="${SOURCE_SUPERVISION_PATH:-/projects/prjs2014/qwen/vqa-v2/Qwen/Qwen3.5-9B/run_856576cb2c/supervision_dataset.pt}"
 
 CMD=(
   python -u -m src.cli.generate

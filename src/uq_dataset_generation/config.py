@@ -58,6 +58,7 @@ class SupervisionGenConfig:
     use_lm_visual_all_layers_mean: bool = False
     use_lm_question_all_layers_mean: bool = False
     use_lm_answer_all_layers_mean: bool = False
+    use_lm_fullspan_all_layers_lasttoken: bool = False
 
     # Layers
     force_middle_layer: Optional[int] = None

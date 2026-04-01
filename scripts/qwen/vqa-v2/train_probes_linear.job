@@ -34,8 +34,10 @@ BATCH_SIZE="${BATCH_SIZE:-32}"
 SEED="${SEED:-42}"
 OUTPUT_DIR="${OUTPUT_DIR:-probe_results/qwen/vqa-v2}"
 
-DATA_SEARCH_ROOT="$DATA_ROOT/vqa-v2/$VLM_PATH"
-DATA_PATH="${DATA_PATH:-$(find "$DATA_SEARCH_ROOT" -path '*/supervision_dataset.pt' | sort | tail -n 1)}"
+# DATA_SEARCH_ROOT="$DATA_ROOT/vqa-v2/$VLM_PATH"
+# DATA_PATH="${DATA_PATH:-$(find "$DATA_SEARCH_ROOT" -path '*/supervision_dataset.pt' | sort | tail -n 1)}"
+
+DATA_PATH="${DATA_PATH:-/projects/prjs2014/qwen/vqa-v2/Qwen/Qwen3.5-9B/run_6d66dbfe2b/supervision_dataset_visual.pt}"
 
 if [[ -z "$DATA_PATH" ]]; then
     echo "Could not find supervision dataset under: $DATA_SEARCH_ROOT" >&2
@@ -49,39 +51,39 @@ FEATURE_LIST=(
   vision_mean_layer_-1
   visual_merged_mean
   visual_merged_lasttok
-  lm_visual_mean_layer_15
-  lm_visual_mean_layer_-1
-  lm_visual_lasttok_layer_16
-  lm_visual_lasttok_layer_-1
-  lm_visual_lasttok_selfattn_layer_15
-  lm_question_mean_layer_16
-  lm_question_mean_layer_-1
-  lm_question_lasttok_layer_16
-  lm_question_lasttok_layer_-1
-  lm_question_mean_selfattn_layer_15
-  lm_question_lasttok_selfattn_layer_15
-  lm_fullspan_mean_layer_16
-  lm_fullspan_mean_layer_-1
-  lm_fullspan_lasttok_layer_16
-  lm_fullspan_lasttok_layer_-1
-  lm_fullspan_mean_selfattn_layer_15
-  lm_fullspan_lasttok_selfattn_layer_15
-  lm_answer_mean_layer_16
-  lm_answer_mean_layer_-1
-  lm_answer_lasttok_layer_16
-  lm_answer_lasttok_layer_-1
-  lm_answer_mean_selfattn_layer_15
-  lm_answer_lasttok_selfattn_layer_15
-  answer_gen_negp_max
-  answer_gen_negp_min
-  answer_gen_negp_mean
-  answer_gen_negp_std
-  answer_gen_neglogp_mean
-  answer_gen_neglogp_std
-  answer_gen_entropy_max
-  answer_gen_entropy_min
-  answer_gen_entropy_mean
-  answer_gen_entropy_std
+  # lm_visual_mean_layer_15
+  # lm_visual_mean_layer_-1
+  # lm_visual_lasttok_layer_16
+  # lm_visual_lasttok_layer_-1
+  # lm_visual_lasttok_selfattn_layer_15
+  # lm_question_mean_layer_16
+  # lm_question_mean_layer_-1
+  # lm_question_lasttok_layer_16
+  # lm_question_lasttok_layer_-1
+  # lm_question_mean_selfattn_layer_15
+  # lm_question_lasttok_selfattn_layer_15
+  # lm_fullspan_mean_layer_16
+  # lm_fullspan_mean_layer_-1
+  # lm_fullspan_lasttok_layer_16
+  # lm_fullspan_lasttok_layer_-1
+  # lm_fullspan_mean_selfattn_layer_15
+  # lm_fullspan_lasttok_selfattn_layer_15
+  # lm_answer_mean_layer_16
+  # lm_answer_mean_layer_-1
+  # lm_answer_lasttok_layer_16
+  # lm_answer_lasttok_layer_-1
+  # lm_answer_mean_selfattn_layer_15
+  # lm_answer_lasttok_selfattn_layer_15
+  # answer_gen_negp_max
+  # answer_gen_negp_min
+  # answer_gen_negp_mean
+  # answer_gen_negp_std
+  # answer_gen_neglogp_mean
+  # answer_gen_neglogp_std
+  # answer_gen_entropy_max
+  # answer_gen_entropy_min
+  # answer_gen_entropy_mean
+  # answer_gen_entropy_std
 )
 
 echo "Using DATA_PATH=$DATA_PATH"

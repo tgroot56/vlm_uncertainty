@@ -1,0 +1,102 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=generalization_model_gen
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=08:00:00
+#SBATCH --output=slurm_outputs/generalization/train_model_gen_%A.out
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+cd "$HOME/vlm_uncertainty/" || exit 1
+
+source activate llava-experiments
+
+export VLM_UQ_STORAGE_ROOT="${VLM_UQ_STORAGE_ROOT:-/projects/prjs2014}"
+export VLM_UQ_USER_STORAGE_ROOT="${VLM_UQ_STORAGE_ROOT:-$VLM_UQ_STORAGE_ROOT/$USER}"
+
+export HF_HOME="${HF_HOME:-$VLM_UQ_USER_STORAGE_ROOT/hf_home}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_datasets}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_transformers}"
+
+mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$TRANSFORMERS_CACHE"
+mkdir -p slurm_outputs/generalization
+
+OUTPUT_ROOT="${OUTPUT_ROOT:-/projects/prjs2014/probe_results}"
+FEATURE_NAMES="${FEATURE_NAMES:-lm_answer_mean_layer_16 answer_gen_entropy_mean lm_fullspan_lasttok_layer_16}"
+MODEL_TYPE="${MODEL_TYPE:-mlp}"
+NUM_EPOCHS="${NUM_EPOCHS:-20}"
+BATCH_SIZE="${BATCH_SIZE:-32}"
+LEARNING_RATE="${LEARNING_RATE:-0.01}"
+WEIGHT_DECAY="${WEIGHT_DECAY:-1e-4}"
+SEEDS="${SEEDS:-42 123 456}"
+DEVICE="${DEVICE:-cuda}"
+DATASETS="${DATASETS:-vqa-v2 coco-qa-vi imagenet-r pope/random}"
+
+run_one() {
+  local source_model="$1"
+  local target_model="$2"
+  local dataset_name="$3"
+  local feature_name="$4"
+
+  CMD=(
+    python -u -m src.cli.run_generalization
+    train-model-gen
+    --source_model_name "$source_model"
+    --target_model_name "$target_model"
+    --dataset_name "$dataset_name"
+    --output_root "$OUTPUT_ROOT"
+    --feature_name "$feature_name"
+    --model_type "$MODEL_TYPE"
+    --num_epochs "$NUM_EPOCHS"
+    --batch_size "$BATCH_SIZE"
+    --learning_rate "$LEARNING_RATE"
+    --weight_decay "$WEIGHT_DECAY"
+    --device "$DEVICE"
+  )
+
+  # shellcheck disable=SC2206
+  SEED_ARRAY=($SEEDS)
+  CMD+=(--seeds "${SEED_ARRAY[@]}")
+
+  if [[ -n "${HIDDEN_DIMS:-}" ]]; then
+    # shellcheck disable=SC2206
+    HIDDEN_DIMS_ARRAY=($HIDDEN_DIMS)
+    CMD+=(--hidden_dims "${HIDDEN_DIMS_ARRAY[@]}")
+  fi
+
+  if [[ "${NO_NORMALIZE:-0}" == "1" ]]; then
+    CMD+=(--no_normalize)
+  fi
+  if [[ "${NO_PRINT_TEST:-0}" == "1" ]]; then
+    CMD+=(--no_print_test)
+  fi
+  if [[ "${USE_CLASS_WEIGHTS:-0}" == "1" ]]; then
+    CMD+=(--use_class_weights)
+  fi
+  if [[ "${NO_SHUFFLED_LABEL_CONTROL:-0}" == "1" ]]; then
+    CMD+=(--no_shuffled_label_control)
+  fi
+
+  srun --ntasks=1 --cpus-per-task=9 "${CMD[@]}"
+}
+
+# shellcheck disable=SC2206
+DATASET_ARRAY=($DATASETS)
+if [[ -n "${FEATURE_NAME:-}" ]]; then
+  FEATURE_NAME_ARRAY=("$FEATURE_NAME")
+else
+  # shellcheck disable=SC2206
+  FEATURE_NAME_ARRAY=($FEATURE_NAMES)
+fi
+
+for feature_name in "${FEATURE_NAME_ARRAY[@]}"; do
+  for dataset_name in "${DATASET_ARRAY[@]}"; do
+    run_one "llava" "qwen" "$dataset_name" "$feature_name" || exit 1
+    run_one "qwen" "llava" "$dataset_name" "$feature_name" || exit 1
+  done
+done

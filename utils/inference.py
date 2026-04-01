@@ -59,26 +59,6 @@ def _extract_prompt_hidden_states_from_generate_output(
     return tuple(prompt_hidden_states)
 
 
-def _build_single_token_answer_hidden_states_from_generate_output(
-    prompt_hidden_states: Tuple[torch.Tensor, ...],
-    generation_hidden_states,
-) -> Optional[Tuple[torch.Tensor, ...]]:
-    if not generation_hidden_states or len(generation_hidden_states) < 2:
-        return None
-
-    first_generated_token_hidden_states = generation_hidden_states[1]
-    if first_generated_token_hidden_states is None:
-        return None
-
-    answer_hidden_states = []
-    for prompt_layer, generated_layer in zip(prompt_hidden_states, first_generated_token_hidden_states):
-        if generated_layer is None or generated_layer.ndim != 3 or generated_layer.shape[1] < 1:
-            return None
-        answer_hidden_states.append(torch.cat([prompt_layer, generated_layer[:, -1:, :]], dim=1))
-
-    return tuple(answer_hidden_states)
-
-
 def _build_answer_hidden_states_from_generate_output(
     prompt_hidden_states: Tuple[torch.Tensor, ...],
     generation_hidden_states,
@@ -86,38 +66,72 @@ def _build_answer_hidden_states_from_generate_output(
 ) -> Optional[Tuple[torch.Tensor, ...]]:
     """
     Reconstruct hidden states for prompt + generated answer directly from
-    `generate(..., output_hidden_states=True)` output.
+    `generate(..., output_hidden_states=True)` output, avoiding a second
+    forward pass.
 
-    For decoder-only generation in transformers, the first hidden-state entry
-    contains the prompt states and subsequent entries contain one newly decoded
-    token each. This lets us avoid a separate forward pass over the answer
-    tokens for Qwen when generation hidden states are available.
+    HuggingFace returns one hidden-state tuple per model call inside generate().
+    Two conventions exist depending on the model/version:
+
+      Offset-0 (legacy): step 0 has shape (B, prompt_len+1, H) — prompt AND first
+        generated token; steps 1..n each have shape (B, 1, H).
+
+      Offset-1 (standard HF): step 0 has shape (B, prompt_len, H) — prompt only;
+        step i (i >= 1) has shape (B, 1, H) and contains generated token i-1.
+
+    We detect the convention from step-0's sequence length and index accordingly.
+    For Qwen3.5 (hybrid GatedDeltaNet + Attention) the hidden states produced
+    during generation are equivalent to those from a full forward pass: attention
+    layers use KV-cache which preserves exact computation, and GatedDeltaNet
+    layers maintain their recurrent state and conv1d buffer across steps.
     """
-    if effective_gen_len <= 0:
+    if effective_gen_len <= 0 or not generation_hidden_states:
         return None
 
-    if effective_gen_len == 1:
-        return _build_single_token_answer_hidden_states_from_generate_output(
-            prompt_hidden_states,
-            generation_hidden_states,
-        )
+    # Detect offset from step-0 shape.
+    first_step = generation_hidden_states[0]
+    if not first_step:
+        return None
+    step0_layer0 = first_step[0]
+    if step0_layer0 is None or step0_layer0.ndim != 3:
+        return None
 
-    if not generation_hidden_states or len(generation_hidden_states) < (effective_gen_len + 1):
+    prompt_len = int(prompt_hidden_states[0].shape[1])
+    step0_seq_len = int(step0_layer0.shape[1])
+
+    if step0_seq_len >= prompt_len + 1:
+        # Offset-0: step 0 holds prompt + first generated token.
+        offset = 0
+        steps_needed = effective_gen_len
+    elif step0_seq_len == prompt_len:
+        # Offset-1: step 0 is prompt only; generated token i is at step i+1.
+        offset = 1
+        steps_needed = effective_gen_len + 1
+    else:
+        return None
+
+    if len(generation_hidden_states) < steps_needed:
         return None
 
     answer_hidden_states = []
     for layer_idx, prompt_layer in enumerate(prompt_hidden_states):
         generated_tokens = []
-        for step_idx in range(1, effective_gen_len + 1):
-            step_hidden_states = generation_hidden_states[step_idx]
-            if step_hidden_states is None or len(step_hidden_states) <= layer_idx:
+
+        for gen_tok_idx in range(effective_gen_len):
+            step_idx = gen_tok_idx + offset
+            step_hs = generation_hidden_states[step_idx]
+            if step_hs is None or len(step_hs) <= layer_idx:
+                return None
+            layer_hs = step_hs[layer_idx]
+            if layer_hs is None or layer_hs.ndim != 3 or layer_hs.shape[1] < 1:
                 return None
 
-            generated_layer = step_hidden_states[layer_idx]
-            if generated_layer is None or generated_layer.ndim != 3 or generated_layer.shape[1] < 1:
-                return None
-
-            generated_tokens.append(generated_layer[:, -1:, :])
+            if gen_tok_idx == 0 and offset == 0:
+                # First generated token sits at position prompt_len inside step 0.
+                if layer_hs.shape[1] < prompt_len + 1:
+                    return None
+                generated_tokens.append(layer_hs[:, prompt_len : prompt_len + 1, :])
+            else:
+                generated_tokens.append(layer_hs[:, -1:, :])
 
         answer_hidden_states.append(torch.cat([prompt_layer, *generated_tokens], dim=1))
 
@@ -538,13 +552,16 @@ def predict_letter_and_logits_with_features(
         option_letters = ["A", "B", "C", "D"]
         print("Warning: option_letters not provided; defaulting to A/B/C/D. If your task has different keys, pass them explicitly for accurate parsing and scoring.")
 
+    # Qwen3.5 tends to generate preamble tokens before the letter (e.g. "The answer is A"),
+    # so 3 tokens is too tight. 15 gives enough room while keeping generation fast.
+    max_new_tokens = 15 if (vlm_adapter is not None and vlm_adapter.family == "qwen") else 3
     feature_bundle = _run_generation_with_features(
         model=model,
         processor=processor,
         device=device,
         image=image,
         prompt=prompt,
-        max_new_tokens=3,
+        max_new_tokens=max_new_tokens,
         do_sample=False,
         temperature=1.0,
         verbose=verbose,

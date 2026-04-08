@@ -60,23 +60,20 @@ def prepare_coco_qa_vi_split(
     """
     Prepare COCO-QA Vietnamese into the same sample schema used by the VQA pipeline.
 
-    By default we use the original English question/answer columns from the dataset
-    for both prompting and evaluation. Set use_translated_text=True to use the
-    translated Vietnamese fields instead.
+    By default we use the non-translated English fields. Set use_translated_text=True
+    to use the Vietnamese translations instead. 
     """
     if max_samples is not None:
         split_obj = split_obj.shuffle(seed=42 + seed_offset)
         split_obj = split_obj.select(range(min(max_samples, len(split_obj))))
 
+    question_key = "translated_question" if use_translated_text else "question"
+    answer_key = "translated_answer" if use_translated_text else "answer"
+
     samples: List[Dict] = []
     for idx, row in enumerate(tqdm(split_obj)):
-        english_question = row.get("question", "")
-        english_answer = row.get("answer", "")
-        translated_question = row.get("translated_question", "")
-        translated_answer = row.get("translated_answer", "")
-
-        question = translated_question if use_translated_text and translated_question else english_question
-        gt_answer = translated_answer if use_translated_text and translated_answer else english_answer
+        question = row.get(question_key) or row.get("question", "")
+        gt_answer = row.get(answer_key) or row.get("answer", "")
 
         prompt = f"Question: {question}\nProvide a short answer."
 
@@ -91,46 +88,9 @@ def prepare_coco_qa_vi_split(
                 "image_id": row.get("image_id"),
                 "question_type": row.get("type"),
                 "dataset_id": "coco-qa-vi",
-                "source_question": english_question,
-                "source_answer": english_answer,
-                "translated_question": translated_question,
-                "translated_answer": translated_answer,
-                "evaluation_language": "vi" if use_translated_text else "en",
+                "source_question": row.get("question", ""),
+                "source_answer": row.get("answer", ""),
                 "split": row.get("split"),
-            }
-        )
-    return samples
-
-
-def prepare_pope_split(split_obj, seed_offset: int, max_samples: Optional[int]) -> List[Dict]:
-    """
-    Prepare POPE into the same open-ended VQA schema used by the supervised UQ pipeline.
-
-    POPE answers are yes/no strings, so downstream scoring uses exact-match normalization.
-    """
-    if max_samples is not None:
-        split_obj = split_obj.shuffle(seed=42 + seed_offset)
-        split_obj = split_obj.select(range(min(max_samples, len(split_obj))))
-
-    samples: List[Dict] = []
-    for idx, row in enumerate(tqdm(split_obj)):
-        question = row.get("question", "")
-        gt_answer = row.get("answer", "")
-
-        prompt = f"Question: {question}\nAnswer with exactly one word: yes or no."
-
-        samples.append(
-            {
-                "idx": idx,
-                "image": row.get("image"),
-                "question": question,
-                "prompt": prompt,
-                "gt_answer": gt_answer,
-                "question_id": row.get("question_id"),
-                "sample_id": row.get("id"),
-                "image_source": row.get("image_source"),
-                "category": row.get("category"),
-                "dataset_id": "pope",
             }
         )
     return samples

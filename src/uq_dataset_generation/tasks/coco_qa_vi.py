@@ -9,7 +9,7 @@ from src.labeling.vqa import score_vqa
 @dataclass(frozen=True)
 class CocoQaViTask:
     """
-    Handles open-ended VQA for COCO-QA Vietnamese.
+    Handles open-ended VQA for COCO-QA
 
     This dataset has a single ground-truth answer per sample, so correctness falls
     back to normalized exact match via score_vqa(..., gt_answer_single=...).

@@ -30,7 +30,7 @@ mkdir -p "$VLM_UQ_PREP_CACHE"
 mkdir -p slurm_outputs/llava
 
 VLM_ID="${VLM_ID:-llava-hf/llava-1.5-7b-hf}"
-DATASET_SPLIT="${DATASET_SPLIT:-adversarial}"
+DATASET_SPLIT="${DATASET_SPLIT:-random}"
 OUTPUT_DIR="${OUTPUT_DIR:-$VLM_UQ_STORAGE_ROOT}"
 SEED="${SEED:-42}"
 DEVICE="${DEVICE:-cuda}"

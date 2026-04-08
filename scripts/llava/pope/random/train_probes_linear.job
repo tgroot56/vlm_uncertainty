@@ -28,7 +28,7 @@ mkdir -p slurm_outputs/llava
 
 DATA_ROOT="${DATA_ROOT:-$VLM_UQ_STORAGE_ROOT}"
 VLM_PATH="${VLM_PATH:-llava-hf/llava-1.5-7b-hf}"
-DATASET_SPLIT="${DATASET_SPLIT:-adversarial}"
+DATASET_SPLIT="${DATASET_SPLIT:-random}"
 MODEL_TYPE="${MODEL_TYPE:-linear}"
 NUM_EPOCHS="${NUM_EPOCHS:-20}"
 BATCH_SIZE="${BATCH_SIZE:-32}"

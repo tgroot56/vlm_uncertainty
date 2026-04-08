@@ -217,9 +217,10 @@ def build_mc_prompt(
     gt_key = next(k for k, v in option_map.items() if v == gt_label)
 
     prompt = (
-        f"{question}\n"
+        f"{question}\n\n"
+        "Choices:\n"
         + "\n".join(f"{k}. {v}" for k, v in option_map.items())
-        + f"\nReply with only one of: {'/'.join(keys)}."
+        + f"\n\nAnswer with only one of: {', '.join(keys)}."
     )
 
     out = {"prompt": prompt, "option_map": option_map, "gt_key": gt_key}

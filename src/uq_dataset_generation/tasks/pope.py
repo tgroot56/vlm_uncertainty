@@ -2,8 +2,48 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
+import re
 
 from src.labeling.vqa import score_vqa
+
+
+def _extract_yes_no_answer(text: str) -> str:
+    """Extract the first explicit yes/no decision from a free-form POPE answer."""
+    normalized = (text or "").strip()
+    lowered = normalized.lower()
+    if not lowered:
+        return normalized
+
+    no_patterns = (
+        r"\bno\b",
+        r"\bnot\b",
+        r"\bthere (?:is|are|appears to be|seems to be) no\b",
+        r"\bthere (?:is|are|appears to be|seems to be) not\b",
+        r"\bthere (?:isn['’]?t|aren['’]?t)\b",
+        r"\bi (?:do not|don['’]?t|cannot|can['’]?t) see\b",
+        r"\bthe image does not (?:contain|show|have)\b",
+        r"\bthe image doesn['’]?t (?:contain|show|have)\b",
+        r"\bdoes not\b",
+        r"\bdoesn['’]?t\b",
+        r"\bcannot\b",
+        r"\bcan['’]?t\b",
+    )
+    yes_patterns = (
+        r"\byes\b",
+        r"\bthere (?:is|are|appears to be|seems to be)\b",
+        r"\bi (?:can|do) see\b",
+        r"\bthe image (?:contains|shows|has)\b",
+    )
+
+    no_match = min((m.start() for pattern in no_patterns if (m := re.search(pattern, lowered))), default=None)
+    yes_match = min((m.start() for pattern in yes_patterns if (m := re.search(pattern, lowered))), default=None)
+
+    if no_match is not None and (yes_match is None or no_match <= yes_match):
+        return "no"
+    if yes_match is not None:
+        return "yes"
+
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -18,11 +58,11 @@ class PopeTask:
         return {}
 
     def predict_kwargs(self, sample: Dict[str, Any]) -> Dict[str, Any]:
-        # POPE is a yes/no task, so we keep generation tight to avoid extra
-        # explanatory tokens that do not carry useful supervision signal.
+        # Allow enough tokens for chatty VLMs to reach a yes/no decision; the
+        # scorer extracts the task answer from the generated text below.
         return {
             "prompt": sample["prompt"],
-            "max_new_tokens": 2,
+            "max_new_tokens": 15,
         }
 
     def interpret_output(
@@ -45,8 +85,10 @@ class PopeTask:
             gen_step_logits,
         ) = prediction_output
 
+        parsed_answer = _extract_yes_no_answer(pred_answer)
+
         corr = score_vqa(
-            pred_answer=pred_answer,
+            pred_answer=parsed_answer,
             gt_answer_single=sample.get("gt_answer"),
         )
 
@@ -54,7 +96,7 @@ class PopeTask:
             "idx": sample.get("idx"),
             "question_id": sample.get("question_id"),
             "sample_id": sample.get("sample_id"),
-            "pred_answer": pred_answer,
+            "pred_answer": parsed_answer,
             "raw_text": pred_answer,
             "gt_answer": sample.get("gt_answer"),
             "category": sample.get("category"),

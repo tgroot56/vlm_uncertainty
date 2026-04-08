@@ -59,6 +59,27 @@ QWEN_ADAPTER = VLMAdapter(
 )
 
 
+MOLMO_ADAPTER = VLMAdapter(
+    family="molmo",
+    loader_kind="auto_image_text_to_text",
+    input_builder="chat_template_tokenized",
+    trust_remote_code=True,
+    assistant_markers=(
+        "<|assistant|>",
+        "Assistant:",
+        "ASSISTANT:",
+        "assistant",
+    ),
+    image_token_text_markers=("image",),
+    vision_attr_paths=(
+        ("model", "vision_backbone"),
+        ("vision_backbone",),
+        ("model", "vision_tower", "vision_model"),
+        ("model", "vision_tower"),
+    ),
+)
+
+
 def get_vlm_adapter(model_id: str) -> VLMAdapter:
     model_id_lower = model_id.lower()
 
@@ -66,6 +87,8 @@ def get_vlm_adapter(model_id: str) -> VLMAdapter:
         return LLAVA_ADAPTER
     if "qwen" in model_id_lower:
         return QWEN_ADAPTER
+    if "molmo" in model_id_lower:
+        return MOLMO_ADAPTER
 
     raise ValueError(
         f"Unknown model_id '{model_id}'. "
@@ -84,6 +107,8 @@ def load_model(
     print(f"Loading {adapter.family} model: {model_id}")
     print(f"Device: {torch_device}, dtype: {dtype}")
 
+    _ensure_default_rope_init()
+
     if adapter.loader_kind == "llava":
         model = _load_llava_model(model_id, torch_device, dtype, adapter.trust_remote_code)
     elif adapter.loader_kind == "auto_image_text_to_text":
@@ -91,10 +116,8 @@ def load_model(
     else:
         raise ValueError(f"Unsupported loader_kind '{adapter.loader_kind}' for model_id '{model_id}'")
 
-    processor = AutoProcessor.from_pretrained(
-        model_id,
-        trust_remote_code=adapter.trust_remote_code,
-    )
+    _ensure_use_cache_attr(model)
+    processor = _load_processor(model_id, adapter)
     model.eval()
 
     print_model_overview(model, adapter.family)
@@ -222,6 +245,9 @@ def extract_vision_features_bundle(
     model: Any,
     inputs: Dict[str, torch.Tensor],
 ) -> Tuple[Optional[Tuple[torch.Tensor, ...]], Optional[torch.Tensor]]:
+    if adapter.family == "molmo":
+        return _extract_molmo_vision_features_bundle(model, inputs)
+
     vision_module = None
     for path in adapter.vision_attr_paths:
         vision_module = _resolve_attr_path(model, path)
@@ -231,10 +257,12 @@ def extract_vision_features_bundle(
     if vision_module is None:
         return None, None
 
-    if "pixel_values" not in inputs:
+    pixel_values = inputs.get("pixel_values")
+    if pixel_values is None:
+        pixel_values = inputs.get("images")
+    if pixel_values is None:
         return None, None
 
-    pixel_values = inputs["pixel_values"]
     image_grid_thw = inputs.get("image_grid_thw")
     try:
         if adapter.family == "qwen" and image_grid_thw is not None:
@@ -268,6 +296,68 @@ def extract_vision_features_bundle(
         return None, merged_states
 
     return getattr(vision_outputs, "hidden_states", None), merged_states
+
+
+def _extract_molmo_vision_features_bundle(
+    model: Any,
+    inputs: Dict[str, torch.Tensor],
+) -> Tuple[Optional[Tuple[torch.Tensor, ...]], Optional[torch.Tensor]]:
+    """Extract Molmo2 ViT block states plus projected image-token features."""
+    molmo_model = getattr(model, "model", None)
+    if molmo_model is None or not hasattr(molmo_model, "merge_visual_inputs"):
+        return None, None
+
+    vision_backbone = getattr(molmo_model, "vision_backbone", None)
+    image_vit = getattr(vision_backbone, "image_vit", None)
+    if vision_backbone is None or image_vit is None:
+        return None, None
+
+    pixel_values = inputs.get("pixel_values")
+    if pixel_values is None:
+        return None, None
+
+    try:
+        images, token_pooling = molmo_model.merge_visual_inputs(
+            input_ids=inputs.get("input_ids"),
+            pixel_values=pixel_values,
+            image_token_pooling=inputs.get("image_token_pooling"),
+            image_grids=inputs.get("image_grids"),
+            image_num_crops=inputs.get("image_num_crops"),
+            pixel_values_videos=inputs.get("pixel_values_videos"),
+            video_token_pooling=inputs.get("video_token_pooling"),
+            video_grids=inputs.get("video_grids"),
+        )
+    except Exception as exc:
+        raise RuntimeError("Failed to build Molmo2 batched image inputs for vision features.") from exc
+
+    if images is None or token_pooling is None:
+        return None, None
+
+    try:
+        images = images.to(device=vision_backbone.device, dtype=vision_backbone.dtype)
+        batch_size, num_crops, num_patches, pixels_per_patch = images.shape
+        flat_images = images.reshape(batch_size * num_crops, num_patches, pixels_per_patch)
+        raw_layer_states = image_vit(flat_images)
+        if not raw_layer_states:
+            return None, None
+
+        hidden_states = []
+        for layer_state in raw_layer_states:
+            layer_state = layer_state.reshape(batch_size, num_crops * num_patches, layer_state.shape[-1])
+            # Molmo ViT has no CLS token. Add a dummy slot so the shared
+            # CLIP-style mean-pool helper can drop index 0 without losing a
+            # real patch token.
+            dummy_cls = torch.zeros(
+                (batch_size, 1, layer_state.shape[-1]),
+                dtype=layer_state.dtype,
+                device=layer_state.device,
+            )
+            hidden_states.append(torch.cat([dummy_cls, layer_state], dim=1))
+
+    except Exception as exc:
+        raise RuntimeError("Failed to run Molmo2 vision backbone for hidden-state extraction.") from exc
+
+    return tuple(hidden_states), None
 
 
 def extract_qwen_selected_vision_tensors_batch(
@@ -376,10 +466,10 @@ def build_full_forward_kwargs(
         if key in {"input_ids", "attention_mask", "position_ids", "cache_position"}:
             continue
 
-        # Qwen provides per-token modality labels for the prompt. When we run a
-        # second forward pass on prompt + generated answer, extend those labels
-        # so the new answer tokens are treated as plain text tokens.
-        if key == "mm_token_type_ids":
+        # Qwen and Molmo provide per-token modality labels for the prompt. When
+        # we run a second forward pass on prompt + generated answer, extend
+        # those labels so the new answer tokens are treated as plain text.
+        if key in {"mm_token_type_ids", "token_type_ids"}:
             if value.shape[1] > full_seq_len:
                 raise ValueError(
                     f"{key} has length {value.shape[1]}, which exceeds full sequence length {full_seq_len}."
@@ -419,6 +509,14 @@ def print_model_overview(model: Any, family: str) -> None:
         vision_cfg = model.visual.config
     elif hasattr(model, "model") and hasattr(model.model, "visual") and hasattr(model.model.visual, "config"):
         vision_cfg = model.model.visual.config
+    elif hasattr(model, "vision_backbone") and hasattr(model.vision_backbone, "vit_config"):
+        vision_cfg = model.vision_backbone.vit_config
+    elif (
+        hasattr(model, "model")
+        and hasattr(model.model, "vision_backbone")
+        and hasattr(model.model.vision_backbone, "vit_config")
+    ):
+        vision_cfg = model.model.vision_backbone.vit_config
 
     if vision_cfg is not None:
         print(f"Vision model type: {getattr(vision_cfg, 'model_type', 'unknown')}")
@@ -483,10 +581,14 @@ def infer_image_token_ids(
 
     common_candidates = (
         "<image>",
+        "<|image|>",
         "<|image_pad|>",
         "<|vision_start|>",
         "<|vision_end|>",
         "<img>",
+        "<im_patch>",
+        "<im_col>",
+        "<im_end>",
     )
     special_strings.update(common_candidates)
 
@@ -506,6 +608,68 @@ def _processor_supports_enable_thinking(processor: Any) -> bool:
     except (TypeError, ValueError):
         return False
     return "enable_thinking" in sig.parameters
+
+
+def _load_processor(model_id: str, adapter: VLMAdapter) -> Any:
+    """Load processor, working around compatibility issues for custom processors."""
+    try:
+        return AutoProcessor.from_pretrained(
+            model_id,
+            trust_remote_code=adapter.trust_remote_code,
+        )
+    except TypeError:
+        # Some custom processors (e.g. Molmo2) pass extra kwargs to the parent
+        # ProcessorMixin.__init__ that older transformers versions reject.
+        # Patch ProcessorMixin.__init__ temporarily to accept and store them.
+        from transformers.processing_utils import ProcessorMixin
+
+        _orig_init = ProcessorMixin.__init__
+
+        def _patched_init(self, *args, **kwargs):
+            extra = {}
+            import inspect
+            sig = inspect.signature(_orig_init)
+            valid_params = set(sig.parameters.keys())
+            for k in list(kwargs):
+                if k not in valid_params:
+                    extra[k] = kwargs.pop(k)
+            _orig_init(self, *args, **kwargs)
+            for k, v in extra.items():
+                setattr(self, k, v)
+
+        ProcessorMixin.__init__ = _patched_init
+        try:
+            return AutoProcessor.from_pretrained(
+                model_id,
+                trust_remote_code=adapter.trust_remote_code,
+            )
+        finally:
+            ProcessorMixin.__init__ = _orig_init
+
+
+def _ensure_default_rope_init() -> None:
+    """Patch ROPE_INIT_FUNCTIONS with a 'default' entry if missing.
+
+    Newer model code (e.g. Molmo2) expects a 'default' RoPE init function that
+    was added in a later transformers release.  If the installed version lacks it,
+    register a simple standard-RoPE implementation so the model can load.
+    """
+    try:
+        from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+    except ImportError:
+        return
+
+    if "default" in ROPE_INIT_FUNCTIONS:
+        return
+
+    def _default_rope_parameters(config, device, seq_len=None, **kwargs):
+        base = config.rope_theta
+        head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+        dim = head_dim
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.int64, device=device).float() / dim))
+        return inv_freq, 1.0
+
+    ROPE_INIT_FUNCTIONS["default"] = _default_rope_parameters
 
 
 def _resolve_device(device: str | None) -> torch.device:
@@ -578,6 +742,26 @@ def _move_batch_to_device(batch: Any, device: torch.device) -> Dict[str, torch.T
     if hasattr(batch, "to"):
         batch = batch.to(device)
     return dict(batch)
+
+
+def _ensure_use_cache_attr(model: Any) -> None:
+    """Backfill config.use_cache for remote-code models that assume it exists.
+
+    Some custom model implementations access ``self.config.use_cache`` directly in
+    ``forward`` even when the loaded config class does not define that field.
+    Defaulting to ``True`` preserves normal cached decoding behavior for models
+    like Molmo that expect image inputs only on the prefill step.
+    """
+    config_candidates = [
+        getattr(model, "config", None),
+        getattr(getattr(model, "model", None), "config", None),
+        getattr(getattr(model, "language_model", None), "config", None),
+    ]
+
+    for config in config_candidates:
+        if config is None or hasattr(config, "use_cache"):
+            continue
+        setattr(config, "use_cache", True)
 
 
 def _extract_qwen_visual_tensor_inputs(batch: Dict[str, torch.Tensor]) -> Optional[Dict[str, torch.Tensor]]:

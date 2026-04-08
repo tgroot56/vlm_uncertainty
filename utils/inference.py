@@ -158,6 +158,10 @@ def _extract_first_key(text: str, option_keys: List[str]) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def _needs_longer_choice_generation(vlm_adapter: Optional[VLMAdapter]) -> bool:
+    return vlm_adapter is not None and vlm_adapter.family in {"qwen", "molmo"}
+
+
 def _compute_effective_generated_length(
     gen_ids: torch.Tensor,
     eos_id: Optional[int],
@@ -178,6 +182,22 @@ def _compute_effective_generated_length(
 
 def _empty_gen_step_logits(model, device: torch.device) -> torch.Tensor:
     return torch.empty((1, 0, model.config.vocab_size), device=device)
+
+
+def _apply_generation_adapter_overrides(
+    generate_kwargs: Dict[str, object],
+    vlm_adapter: VLMAdapter,
+) -> Dict[str, object]:
+    if vlm_adapter.family == "molmo":
+        # Molmo2's remote generation helper re-attaches image tensors whenever
+        # cache_position starts at 0.  In newer transformers versions,
+        # cache_position is kept as the full position vector across decode
+        # steps, while input_ids is sliced to the latest text token when the
+        # cache is enabled.  That makes Molmo see image tensors with no image
+        # tokens.  Molmo generation is still short for these tasks, so disabling
+        # the cache is the safest compatibility path.
+        generate_kwargs["use_cache"] = False
+    return generate_kwargs
 
 
 def _run_generation_with_features(
@@ -251,6 +271,7 @@ def _run_generation_with_features(
             output_scores=True,
             output_hidden_states=True,
         )
+        generate_kwargs = _apply_generation_adapter_overrides(generate_kwargs, vlm_adapter)
         if do_sample:
             generate_kwargs["temperature"] = temperature
 
@@ -297,6 +318,7 @@ def _run_generation_with_features(
             return_dict_in_generate=True,
             output_scores=True,
         )
+        generate_kwargs = _apply_generation_adapter_overrides(generate_kwargs, vlm_adapter)
         if do_sample:
             generate_kwargs["temperature"] = temperature
 
@@ -478,13 +500,19 @@ def predict_letter_and_logits(
 
     inputs = prepare_inputs(vlm_adapter, processor, image, prompt, device)
 
-    out = model.generate(
+    generate_kwargs = dict(
         **inputs,
         max_new_tokens=3,
         do_sample=False,
         return_dict_in_generate=True,
         output_scores=True,
     )
+    generate_kwargs = _apply_generation_adapter_overrides(generate_kwargs, vlm_adapter)
+
+    if _needs_longer_choice_generation(vlm_adapter):
+        generate_kwargs["max_new_tokens"] = 15
+
+    out = model.generate(**generate_kwargs)
 
     prompt_len = inputs["input_ids"].shape[1]
     gen_ids = out.sequences[:, prompt_len:]
@@ -552,9 +580,9 @@ def predict_letter_and_logits_with_features(
         option_letters = ["A", "B", "C", "D"]
         print("Warning: option_letters not provided; defaulting to A/B/C/D. If your task has different keys, pass them explicitly for accurate parsing and scoring.")
 
-    # Qwen3.5 tends to generate preamble tokens before the letter (e.g. "The answer is A"),
+    # Some chatty VLMs generate a preamble before the answer (e.g. "The answer is A"),
     # so 3 tokens is too tight. 15 gives enough room while keeping generation fast.
-    max_new_tokens = 15 if (vlm_adapter is not None and vlm_adapter.family == "qwen") else 3
+    max_new_tokens = 15 if _needs_longer_choice_generation(vlm_adapter) else 3
     feature_bundle = _run_generation_with_features(
         model=model,
         processor=processor,

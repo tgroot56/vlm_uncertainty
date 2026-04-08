@@ -1,0 +1,92 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=train_llava_ir_layers
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --mem=180G
+#SBATCH --time=24:00:00
+#SBATCH --output=slurm_outputs/recovery/train_llava_imagenet_r_layer_experiment_%A.out
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+cd "$HOME/vlm_uncertainty/" || exit 1
+
+source activate llava-experiments
+
+mkdir -p slurm_outputs/recovery
+
+LAYER_EXPERIMENT_ROOT="${LAYER_EXPERIMENT_ROOT:-/projects/prjs2014/llava/layer_experiment}"
+DATA_PATH="${DATA_PATH:-$LAYER_EXPERIMENT_ROOT/imagenet-r/llava-hf/llava-1.5-7b-hf/run_1b519a1811/supervision_dataset.pt}"
+MODEL_TYPE="${MODEL_TYPE:-mlp}"
+NUM_EPOCHS="${NUM_EPOCHS:-20}"
+BATCH_SIZE="${BATCH_SIZE:-32}"
+SEED="${SEED:-42}"
+TRAIN_OUTPUT_DIR="${TRAIN_OUTPUT_DIR:-$LAYER_EXPERIMENT_ROOT/probe_results/imagenet-r/${MODEL_TYPE}_layer_comparison}"
+
+if [[ ! -f "$DATA_PATH" ]]; then
+  echo "Recovered supervision dataset not found: $DATA_PATH" >&2
+  exit 1
+fi
+
+mapfile -t FEATURE_LIST < <(
+  python - <<'PY' "$DATA_PATH"
+import re
+import sys
+import torch
+
+payload = torch.load(sys.argv[1], map_location="cpu", weights_only=False, mmap=True)
+feature_names = payload.get("feature_names", [])
+prefix_order = {
+    "lm_visual_mean_layer_": 0,
+    "lm_question_mean_layer_": 1,
+    "lm_answer_mean_layer_": 2,
+    "lm_fullspan_lasttok_layer_": 3,
+}
+
+def sort_key(name: str):
+    for prefix, prefix_rank in prefix_order.items():
+        if name.startswith(prefix):
+            suffix = name[len(prefix):]
+            match = re.fullmatch(r"-?\d+", suffix)
+            layer_idx = int(suffix) if match else 10**9
+            return (prefix_rank, layer_idx, name)
+    return (len(prefix_order), 10**9, name)
+
+selected = [
+    name for name in feature_names
+    if any(name.startswith(prefix) for prefix in prefix_order)
+]
+
+for name in sorted(selected, key=sort_key):
+    print(name)
+PY
+)
+
+if [[ "${#FEATURE_LIST[@]}" -eq 0 ]]; then
+  echo "No layer-experiment features were found in: $DATA_PATH" >&2
+  exit 1
+fi
+
+echo "Training probes for ${#FEATURE_LIST[@]} layer features"
+echo "Data path: $DATA_PATH"
+echo "Output dir: $TRAIN_OUTPUT_DIR"
+
+for FEATURE in "${FEATURE_LIST[@]}"; do
+  echo "------------------------------------------------------------"
+  echo "Training probe for feature: $FEATURE"
+  echo "------------------------------------------------------------"
+
+  srun python -m src.cli.train \
+    --data_path "$DATA_PATH" \
+    --features "$FEATURE" \
+    --model_type "$MODEL_TYPE" \
+    --num_epochs "$NUM_EPOCHS" \
+    --batch_size "$BATCH_SIZE" \
+    --output_dir "$TRAIN_OUTPUT_DIR" \
+    --seed "$SEED" \
+    --no_class_weights
+done

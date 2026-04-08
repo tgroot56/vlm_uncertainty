@@ -1,0 +1,46 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=molmo_patch_build_precal
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=24:00:00
+#SBATCH --output=slurm_outputs/patching/molmo/build_precal_%A.out
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+cd "$HOME/vlm_uncertainty/" || exit 1
+
+source activate llava-experiments
+
+export VLM_UQ_STORAGE_ROOT="${VLM_UQ_STORAGE_ROOT:-/projects/prjs2014}"
+export VLM_UQ_USER_STORAGE_ROOT="${VLM_UQ_USER_STORAGE_ROOT:-$VLM_UQ_STORAGE_ROOT/$USER}"
+
+export HF_HOME="${HF_HOME:-$VLM_UQ_USER_STORAGE_ROOT/hf_home}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_datasets}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_transformers}"
+
+mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$TRANSFORMERS_CACHE"
+
+export VLM_UQ_PREP_CACHE="${VLM_UQ_PREP_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/vlm_uq_prepared_cache}"
+mkdir -p "$VLM_UQ_PREP_CACHE"
+mkdir -p slurm_outputs/patching/molmo
+
+VLM_ID="${VLM_ID:-allenai/Molmo2-O-7B}"
+DATASET="${DATASET:-vqa-v2}"
+MAX_SAMPLES="${MAX_SAMPLES:-2000}"
+SEED="${SEED:-42}"
+DEVICE="${DEVICE:-cuda}"
+
+CALIBRATION_PATH="${CALIBRATION_PATH:?Set CALIBRATION_PATH to a calibration.json}"
+
+srun python -u -m src.cli.build_patching_dataset \
+  --vlm "$VLM_ID" \
+  --dataset "$DATASET" \
+  --max_samples "$MAX_SAMPLES" \
+  --load_calibration "$CALIBRATION_PATH" \
+  --seed "$SEED" \
+  --device "$DEVICE"

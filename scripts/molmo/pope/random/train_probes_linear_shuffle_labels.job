@@ -2,11 +2,11 @@
 
 #SBATCH --partition=gpu_a100
 #SBATCH --gpus=1
-#SBATCH --job-name=llava_train_pope_probes
+#SBATCH --job-name=molmo_train_pope_linear_shuffle_labels_probes
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=04:00:00
-#SBATCH --output=slurm_outputs/llava/pope_train_probes_%A.out
+#SBATCH --output=slurm_outputs/molmo/pope_train_probes_linear_shuffle_labels_%A.out
 
 module purge
 module load 2025
@@ -24,16 +24,16 @@ export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_data
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_transformers}"
 
 mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$TRANSFORMERS_CACHE"
-mkdir -p slurm_outputs/llava
+mkdir -p slurm_outputs/molmo
 
-DATA_ROOT="${DATA_ROOT:-$VLM_UQ_STORAGE_ROOT}"
-VLM_PATH="${VLM_PATH:-llava-hf/llava-1.5-7b-hf}"
+DATA_ROOT="${DATA_ROOT:-$VLM_UQ_STORAGE_ROOT/molmo}"
+VLM_PATH="${VLM_PATH:-allenai/Molmo2-O-7B}"
 DATASET_SPLIT="${DATASET_SPLIT:-random}"
-MODEL_TYPE="${MODEL_TYPE:-mlp}"
+MODEL_TYPE="${MODEL_TYPE:-linear}"
 NUM_EPOCHS="${NUM_EPOCHS:-20}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 SEED="${SEED:-42}"
-OUTPUT_DIR="${OUTPUT_DIR:-probe_results/pope/${DATASET_SPLIT}}"
+OUTPUT_DIR="${OUTPUT_DIR:-probe_results/molmo/pope/${DATASET_SPLIT}/baselines}"
 
 DATA_SEARCH_ROOT="$DATA_ROOT/pope/$DATASET_SPLIT/$VLM_PATH"
 DATA_PATH="${DATA_PATH:-$(find "$DATA_SEARCH_ROOT" -path '*/supervision_dataset.pt' | sort | tail -n 1)}"
@@ -95,5 +95,6 @@ for FEATURE in "${FEATURE_LIST[@]}"; do
     --batch_size "$BATCH_SIZE" \
     --output_dir "$OUTPUT_DIR" \
     --seed "$SEED" \
+    --shuffle_train_labels \
     --no_class_weights
 done

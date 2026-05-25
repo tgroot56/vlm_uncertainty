@@ -37,7 +37,7 @@ DEVICE="${DEVICE:-cuda}"
 MIDDLE_LAYER="${MIDDLE_LAYER:-16}"
 
 PATCHING_DATASET="${PATCHING_DATASET:-$VLM_UQ_STORAGE_ROOT/patching/$VLM_SHORT/$DATASET/patching_dataset_${DATASET}_recoverable.json}"
-ACTIVATIONS_DIR="${ACTIVATIONS_DIR:-$VLM_UQ_USER_STORAGE_ROOT/patching/supervised_datasets/$VLM_SHORT}"
+ACTIVATIONS_DIR="${ACTIVATIONS_DIR:-$VLM_UQ_STORAGE_ROOT/patching/supervised_datasets/$VLM_SHORT/$DATASET/$VLM_SHORT}"
 OUTPUT_DIR="${OUTPUT_DIR:-$VLM_UQ_STORAGE_ROOT/patching/patching_results/$VLM_SHORT/$DATASET/recoverable_failures}"
 
 srun python -u -m src.cli.run_patching \

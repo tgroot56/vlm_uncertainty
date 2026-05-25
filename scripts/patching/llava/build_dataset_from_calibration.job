@@ -31,18 +31,33 @@ mkdir -p slurm_outputs/patching/llava
 
 VLM_ID="${VLM_ID:-llava-hf/llava-1.5-7b-hf}"
 DATASET="${DATASET:-vqa-v2}"
+DATASET_SPLIT="${DATASET_SPLIT:-}"
 MAX_SAMPLES="${MAX_SAMPLES:-2000}"
 SEED="${SEED:-42}"
 DEVICE="${DEVICE:-cuda}"
+OUTPUT_DIR="${OUTPUT_DIR:-}"
+
+if [[ "$DATASET" == "pope" && -z "$DATASET_SPLIT" ]]; then
+  DATASET_SPLIT="random"
+fi
 
 # CALIBRATION_PATH must point to a previously saved calibration.json.
 # Example: /projects/prjs2014/patching/llava-hf_llava-1-5-7b-hf/vqa-v2/calibration.json
 CALIBRATION_PATH="${CALIBRATION_PATH:-/projects/prjs2014/patching/llava-hf_llava-1-5-7b-hf/vqa-v2/calibration.json}"
 
+EXTRA_ARGS=()
+if [[ -n "$DATASET_SPLIT" ]]; then
+  EXTRA_ARGS+=(--dataset_split "$DATASET_SPLIT")
+fi
+if [[ -n "$OUTPUT_DIR" ]]; then
+  EXTRA_ARGS+=(--output_dir "$OUTPUT_DIR")
+fi
+
 # Build using pre-existing calibration — all samples go to the build phase.
 srun python -u -m src.cli.build_patching_dataset \
   --vlm "$VLM_ID" \
   --dataset "$DATASET" \
+  "${EXTRA_ARGS[@]}" \
   --max_samples "$MAX_SAMPLES" \
   --load_calibration "$CALIBRATION_PATH" \
   --seed "$SEED" \

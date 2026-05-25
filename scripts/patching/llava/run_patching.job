@@ -5,7 +5,7 @@
 #SBATCH --job-name=llava_patch_run
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=00:40:00
+#SBATCH --time=04:00:00
 #SBATCH --output=slurm_outputs/patching/llava/run_patching_%A.out
 
 module purge
@@ -32,13 +32,13 @@ mkdir -p slurm_outputs/patching/llava
 VLM_ID="${VLM_ID:-llava-hf/llava-1.5-7b-hf}"
 VLM_SHORT="${VLM_ID//\//_}"
 VLM_SHORT="${VLM_SHORT//./-}"
-DATASET="${DATASET:-vqa-v2}"
+DATASET="${DATASET:-imagenet-r}"
 DEVICE="${DEVICE:-cuda}"
 MIDDLE_LAYER="${MIDDLE_LAYER:-16}"
-MAX_SAMPLES="${MAX_SAMPLES:-500}"
+MAX_SAMPLES="${MAX_SAMPLES:-1000}"
 
 PATCHING_DATASET="${PATCHING_DATASET:-$VLM_UQ_STORAGE_ROOT/patching/$VLM_SHORT/$DATASET/patching_dataset_$DATASET.json}"
-ACTIVATIONS_DIR="${ACTIVATIONS_DIR:-$VLM_UQ_USER_STORAGE_ROOT/patching/supervised_datasets/$VLM_SHORT}"
+ACTIVATIONS_DIR="${ACTIVATIONS_DIR:-$VLM_UQ_STORAGE_ROOT/patching/supervised_datasets/$VLM_SHORT/$DATASET/$VLM_SHORT}"
 OUTPUT_DIR="${OUTPUT_DIR:-$VLM_UQ_STORAGE_ROOT/patching/patching_results/$VLM_SHORT/$DATASET}"
 
 srun python -u -m src.cli.run_patching \

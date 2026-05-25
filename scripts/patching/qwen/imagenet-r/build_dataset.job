@@ -1,0 +1,52 @@
+#!/bin/bash
+
+# Build paired clean + extreme-blur patching dataset for Qwen on imagenet-r.
+# Loads an extreme-only calibration (no sigma sweep) so build time ≈ 1/4 of a
+# full mild/moderate/severe/extreme build.
+
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --job-name=imagenet_r_qwen_patch_build
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=18:00:00
+#SBATCH --output=slurm_outputs/patching/qwen/imagenet-r/build_%A.out
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+cd "$HOME/vlm_uncertainty/" || exit 1
+
+source activate llava-experiments
+
+export VLM_UQ_STORAGE_ROOT="${VLM_UQ_STORAGE_ROOT:-/projects/prjs2014}"
+export VLM_UQ_USER_STORAGE_ROOT="${VLM_UQ_USER_STORAGE_ROOT:-$VLM_UQ_STORAGE_ROOT/$USER}"
+
+export HF_HOME="${HF_HOME:-$VLM_UQ_USER_STORAGE_ROOT/hf_home}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_datasets}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_transformers}"
+
+mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$TRANSFORMERS_CACHE"
+export VLM_UQ_PREP_CACHE="${VLM_UQ_PREP_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/vlm_uq_prepared_cache}"
+mkdir -p "$VLM_UQ_PREP_CACHE"
+mkdir -p slurm_outputs/patching/qwen/imagenet-r
+
+VLM_ID="${VLM_ID:-Qwen/Qwen3.5-9B}"
+VLM_SHORT="${VLM_ID//\//_}"
+VLM_SHORT="${VLM_SHORT//./-}"
+DATASET=imagenet-r
+MAX_SAMPLES="${MAX_SAMPLES:-1000}"
+SEED="${SEED:-42}"
+DEVICE="${DEVICE:-cuda}"
+CALIBRATION_JSON="${CALIBRATION_JSON:-$VLM_UQ_STORAGE_ROOT/patching/$VLM_SHORT/$DATASET/calibration_extreme_only.json}"
+OUTPUT_DIR="${OUTPUT_DIR:-$VLM_UQ_STORAGE_ROOT/patching/$VLM_SHORT/$DATASET}"
+
+srun python -u -m src.cli.build_patching_dataset \
+  --vlm "$VLM_ID" \
+  --dataset "$DATASET" \
+  --max_samples "$MAX_SAMPLES" \
+  --load_calibration "$CALIBRATION_JSON" \
+  --output_dir "$OUTPUT_DIR" \
+  --seed "$SEED" \
+  --device "$DEVICE"

@@ -1,0 +1,16 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --job-name=qwen_vqa_v2_layers
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=12:00:00
+#SBATCH --mem=128G
+#SBATCH --output=slurm_outputs/qwen/vqa_v2_layer_experiment_%A.out
+
+export DATASET_ID="${DATASET_ID:-vqa-v2}"
+export DATASET_LABEL="${DATASET_LABEL:-VQA-v2}"
+export OUTPUT_STEM="${OUTPUT_STEM:-qwen_vqa_v2_mlp_layer_brier}"
+
+exec bash "$HOME/vlm_uncertainty/scripts/qwen/coco-qa-vi/layer_experiment.job"

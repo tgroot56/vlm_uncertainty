@@ -31,7 +31,7 @@ mkdir -p "$VLM_UQ_PREP_CACHE"
 mkdir -p slurm_outputs/qwen
 
 VLM_ID="${VLM_ID:-Qwen/Qwen3.5-9B}"
-DATASET_SPLIT="${DATASET_SPLIT:-adversarial}"
+DATASET_SPLIT="${DATASET_SPLIT:-random}"
 OUTPUT_DIR="${OUTPUT_DIR:-$VLM_UQ_STORAGE_ROOT/qwen}"
 SEED="${SEED:-42}"
 DEVICE="${DEVICE:-cuda}"

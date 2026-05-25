@@ -1,0 +1,65 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --job-name=mismatch_sanity_check
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --time=00:10:00
+#SBATCH --output=slurm_outputs/mismatch/run_mismatch_sanity_check_%A.out
+
+# CPU-only workload (loads supervised_dataset.pt into RAM and joins with probe
+# CSVs); a GPU partition is used only because that's the project convention,
+# the CLI does not touch CUDA.
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+cd "$HOME/vlm_uncertainty/" || exit 1
+
+source activate llava-experiments
+
+export VLM_UQ_STORAGE_ROOT="${VLM_UQ_STORAGE_ROOT:-/projects/prjs2014}"
+export VLM_UQ_USER_STORAGE_ROOT="${VLM_UQ_USER_STORAGE_ROOT:-$VLM_UQ_STORAGE_ROOT/$USER}"
+
+mkdir -p slurm_outputs/mismatch
+
+MODEL="${MODEL:-qwen}"
+DATASET="${DATASET:-coco-qa-vi}"
+PROBE_TYPE="${PROBE_TYPE:-mlp}"
+SELECTION_METRIC="${SELECTION_METRIC:-auroc}"  # auroc or brier
+CONFIDENCE_FEATURE="${CONFIDENCE_FEATURE:-answer_gen_entropy_mean}"
+CORRECT_THRESHOLD="${CORRECT_THRESHOLD:-0.5}"
+STRICT_PCT="${STRICT_PCT:-0.8}"
+POPE_SPLIT="${POPE_SPLIT:-}"  # required when DATASET=pope; one of {adversarial,random}
+
+OUTPUT_DIR="${OUTPUT_DIR:-$VLM_UQ_USER_STORAGE_ROOT/mismatch}"
+mkdir -p "$OUTPUT_DIR"
+DATASET_TAG="$DATASET"
+if [[ -n "$POPE_SPLIT" ]]; then
+  DATASET_TAG="${DATASET}_${POPE_SPLIT}"
+fi
+OUTPUT_CSV="${OUTPUT_CSV:-$OUTPUT_DIR/mismatch_sanity_check_${MODEL}_${DATASET_TAG}.csv}"
+
+CMD=(python -u -m src.cli.run_mismatch_sanity_check
+     --model "$MODEL"
+     --dataset "$DATASET"
+     --probe_type "$PROBE_TYPE"
+     --selection_metric "$SELECTION_METRIC"
+     --confidence_feature "$CONFIDENCE_FEATURE"
+     --correct_threshold "$CORRECT_THRESHOLD"
+     --strict_pct "$STRICT_PCT"
+     --output_csv "$OUTPUT_CSV")
+
+if [[ -n "${FEATURE:-}" ]]; then
+  CMD+=(--feature "$FEATURE")
+fi
+if [[ -n "${RUN_HASH:-}" ]]; then
+  CMD+=(--run_hash "$RUN_HASH")
+fi
+if [[ -n "$POPE_SPLIT" ]]; then
+  CMD+=(--pope_split "$POPE_SPLIT")
+fi
+
+srun "${CMD[@]}"

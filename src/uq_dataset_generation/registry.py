@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Any
 
-from .tasks import CocoQaViTask, ImageNetRTask, PopeTask, VQAv2Task
+from .tasks import CocoQaViTask, ImageNetRTask, MSTSTask, PopeTask, VQAv2Task
 
 
 def get_task(dataset_id: str) -> Any:
@@ -13,4 +13,6 @@ def get_task(dataset_id: str) -> Any:
         return CocoQaViTask()
     if dataset_id == "pope":
         return PopeTask()
+    if dataset_id == "msts":
+        return MSTSTask()
     raise ValueError(f"Unknown dataset_id '{dataset_id}' for UQ generation task registry")

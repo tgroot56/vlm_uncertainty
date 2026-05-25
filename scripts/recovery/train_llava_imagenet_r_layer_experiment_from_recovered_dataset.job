@@ -41,24 +41,31 @@ import torch
 payload = torch.load(sys.argv[1], map_location="cpu", weights_only=False, mmap=True)
 feature_names = payload.get("feature_names", [])
 prefix_order = {
-    "lm_visual_mean_layer_": 0,
-    "lm_question_mean_layer_": 1,
-    "lm_answer_mean_layer_": 2,
-    "lm_fullspan_lasttok_layer_": 3,
+    "vision_mean_layer_": 0,
+    "lm_visual_mean_layer_": 1,
+    "lm_visual_lasttok_layer_": 2,
+    "lm_question_lasttok_layer_": 3,
+    "lm_answer_lasttok_layer_": 4,
+    "lm_fullspan_lasttok_layer_": 5,
+}
+scalar_order = {
+    "answer_gen_geom_mean_probability": 6,
 }
 
 def sort_key(name: str):
+    if name in scalar_order:
+        return (scalar_order[name], 10**9, name)
     for prefix, prefix_rank in prefix_order.items():
         if name.startswith(prefix):
             suffix = name[len(prefix):]
             match = re.fullmatch(r"-?\d+", suffix)
             layer_idx = int(suffix) if match else 10**9
             return (prefix_rank, layer_idx, name)
-    return (len(prefix_order), 10**9, name)
+    return (len(prefix_order) + len(scalar_order), 10**9, name)
 
 selected = [
     name for name in feature_names
-    if any(name.startswith(prefix) for prefix in prefix_order)
+    if name in scalar_order or any(name.startswith(prefix) for prefix in prefix_order)
 ]
 
 for name in sorted(selected, key=sort_key):

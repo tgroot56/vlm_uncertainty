@@ -1,0 +1,39 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --job-name=qwen_raw_think_recovery
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=00:30:00
+#SBATCH --mem=96G
+#SBATCH --output=slurm_outputs/patching/qwen/raw_think_recovery_%A.out
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+cd "$HOME/vlm_uncertainty/" || exit 1
+
+source activate llava-experiments
+
+export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
+
+export VLM_UQ_STORAGE_ROOT="${VLM_UQ_STORAGE_ROOT:-/projects/prjs2014}"
+export VLM_UQ_USER_STORAGE_ROOT="${VLM_UQ_USER_STORAGE_ROOT:-$VLM_UQ_STORAGE_ROOT/$USER}"
+
+export HF_HOME="${HF_HOME:-$VLM_UQ_USER_STORAGE_ROOT/hf_home}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_datasets}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_transformers}"
+export VLM_UQ_PREP_CACHE="${VLM_UQ_PREP_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/vlm_uq_prepared_cache}"
+
+mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$TRANSFORMERS_CACHE" "$VLM_UQ_PREP_CACHE"
+mkdir -p slurm_outputs/patching/qwen
+
+python -u -m scripts.patching.qwen.check_raw_think_token_recovery \
+  --vlm "${VLM_ID:-Qwen/Qwen3.5-9B}" \
+  --dataset-json "${PATCHING_DATASET:-/projects/prjs2014/patching/Qwen_Qwen3-5-9B/coco-qa-vi/patching_dataset_coco-qa-vi.json}" \
+  --dataset-id "${DATASET:-coco-qa-vi}" \
+  --num-samples "${NUM_SAMPLES:-3}" \
+  --layer "${LAYER:-31}" \
+  --severity "${SEVERITY:-extreme}"

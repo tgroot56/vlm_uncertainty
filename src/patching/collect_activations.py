@@ -162,10 +162,13 @@ def _run_prompt_forward(
     Returns dict with:
         lm_hidden_states – tuple of (1, prompt_len, H) per layer
         token_spans      – dict from build_token_spans
-        gen_step_logits  – (1, T, V) logits per generated step
-        gen_ids          – (1, T)
-        raw_text         – decoded answer string
+        gen_step_logits  – (1, T, V) logits per generated step (post-thinking
+                           for Qwen, so step 0 is the first real answer token)
+        gen_ids          – (1, T)       (same trimming as gen_step_logits)
+        raw_text         – decoded answer string (thinking block stripped)
     """
+    from src.vlm import qwen_patching_max_new_tokens, strip_qwen_thinking_prefix
+
     inputs = prepare_inputs(vlm_adapter, processor, image, prompt, device)
     input_ids = inputs["input_ids"][0]
     prompt_len = int(inputs["input_ids"].shape[1])
@@ -174,10 +177,13 @@ def _run_prompt_forward(
     outputs = model(**inputs, output_hidden_states=True, return_dict=True)
     lm_hidden_states = outputs.hidden_states
 
-    # Short generation — gives us logits / predicted answer
+    # Short generation — gives us logits / predicted answer. Qwen3.5 emits
+    # an empty '<think></think>' preamble before the real answer, so give it
+    # extra budget for non-multichoice tasks.
+    effective_max_new_tokens = qwen_patching_max_new_tokens(vlm_adapter, max_new_tokens)
     generate_kwargs = dict(
         **inputs,
-        max_new_tokens=max_new_tokens,
+        max_new_tokens=effective_max_new_tokens,
         do_sample=False,
         return_dict_in_generate=True,
         output_scores=True,
@@ -186,12 +192,33 @@ def _run_prompt_forward(
         generate_kwargs["use_cache"] = False
 
     out = model.generate(**generate_kwargs)
-    gen_ids = out.sequences[:, prompt_len:]
-    gen_step_logits = (
+    gen_ids_full = out.sequences[:, prompt_len:]
+    gen_step_logits_full = (
         torch.stack(out.scores, dim=1) if len(out.scores) > 0
         else torch.empty((1, 0, model.config.vocab_size), device=device)
     )
+
+    # For Qwen, trim the leading '<think>…</think>' preamble from gen_ids and
+    # gen_step_logits so downstream consumers see step-0 = first real answer
+    # token. This keeps `first_prob`/entropy metrics comparable across models.
+    offset = 0
+    if vlm_adapter.family == "qwen" and gen_ids_full.shape[1] > 0:
+        token_list = gen_ids_full[0].tolist()
+        THINK_END_ID = 248069
+        if THINK_END_ID in token_list:
+            end_idx = token_list.index(THINK_END_ID)
+            offset = end_idx + 1
+            while offset < len(token_list) and token_list[offset] in (271, 198):
+                offset += 1
+
+    gen_ids = gen_ids_full[:, offset:]
+    gen_step_logits = gen_step_logits_full[:, offset:, :]
+
     raw_text = processor.batch_decode(gen_ids, skip_special_tokens=True)[0].strip()
+    if vlm_adapter.family == "qwen":
+        # Guard against pathological cases where the regex catches residual
+        # think markup that didn't token-match (e.g. decoded whitespace).
+        raw_text = strip_qwen_thinking_prefix(raw_text)
 
     # Token spans
     lm_hidden_len = int(lm_hidden_states[0].shape[1])

@@ -39,6 +39,17 @@ from src.patching.perturbations import apply_gaussian_blur
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _prepare_image_for_png(image: Image.Image) -> Image.Image:
+    """Convert non-PNG-friendly PIL modes to RGB before saving."""
+    if image.mode == "RGB":
+        return image
+    if image.mode in {"RGBA", "LA"}:
+        background = Image.new("RGB", image.size, (255, 255, 255))
+        alpha = image.getchannel("A")
+        background.paste(image.convert("RGB"), mask=alpha)
+        return background
+    return image.convert("RGB")
+
 def _score_sample(pred_answer: str, sample: Dict[str, Any], dataset_id: str) -> float:
     """Score a prediction using dataset-specific logic matching the probing experiments."""
     if dataset_id == "imagenet-r":
@@ -75,12 +86,17 @@ def _predict(
     prompt: str,
     max_new_tokens: int = 4,
 ) -> tuple[str, float]:
-    from src.vlm import prepare_inputs
+    from src.vlm import (
+        prepare_inputs,
+        qwen_patching_max_new_tokens,
+        strip_qwen_thinking_prefix,
+    )
 
     inputs = prepare_inputs(vlm_adapter, processor, image, prompt, device)
+    effective_max_new_tokens = qwen_patching_max_new_tokens(vlm_adapter, max_new_tokens)
     out = model.generate(
         **inputs,
-        max_new_tokens=max_new_tokens,
+        max_new_tokens=effective_max_new_tokens,
         do_sample=False,
         return_dict_in_generate=True,
         output_scores=True,
@@ -88,13 +104,29 @@ def _predict(
     prompt_len = inputs["input_ids"].shape[1]
     gen_ids = out.sequences[:, prompt_len:]
     pred = processor.batch_decode(gen_ids, skip_special_tokens=True)[0].strip()
+    if vlm_adapter.family == "qwen":
+        pred = strip_qwen_thinking_prefix(pred)
 
-    # Top-1 probability from the first generated token's logits
+    # Top-1 probability from the first post-thinking generated token's logits
+    top1_prob = 0.0
     if out.scores:
-        first_logits = out.scores[0][0].float()  # (V,)
+        think_end_id = 248069  # '</think>' token for Qwen3.5
+        logits_idx = 0
+        if vlm_adapter.family == "qwen":
+            gen_token_ids = gen_ids[0].tolist()
+            for i, tid in enumerate(gen_token_ids):
+                if tid == think_end_id and i + 1 < len(gen_token_ids):
+                    logits_idx = i + 1
+                    # skip any newline tokens that commonly follow </think>
+                    while (
+                        logits_idx + 1 < len(gen_token_ids)
+                        and gen_token_ids[logits_idx] == 271  # '\n\n'
+                    ):
+                        logits_idx += 1
+                    break
+            logits_idx = min(logits_idx, len(out.scores) - 1)
+        first_logits = out.scores[logits_idx][0].float()
         top1_prob = float(F.softmax(first_logits, dim=0).max().item())
-    else:
-        top1_prob = 0.0
 
     return pred, top1_prob
 
@@ -110,7 +142,7 @@ def _save_blurred_image(
     os.makedirs(img_dir, exist_ok=True)
     fname = f"{sample_id}_sigma{sigma:.1f}.png"
     path = os.path.join(img_dir, fname)
-    image.save(path)
+    _prepare_image_for_png(image).save(path)
     return path
 
 
@@ -124,7 +156,7 @@ def _save_clean_image(
     os.makedirs(img_dir, exist_ok=True)
     fname = f"{sample_id}.png"
     path = os.path.join(img_dir, fname)
-    image.save(path)
+    _prepare_image_for_png(image).save(path)
     return path
 
 

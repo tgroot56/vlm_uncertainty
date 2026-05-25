@@ -80,6 +80,11 @@ FEATURE_LIST=(
   answer_gen_entropy_std
 )
 
+if [[ -n "${FEATURE_LIST_OVERRIDE:-}" ]]; then
+  # shellcheck disable=SC2206
+  FEATURE_LIST=($FEATURE_LIST_OVERRIDE)
+fi
+
 echo "Using DATA_PATH=$DATA_PATH"
 
 for FEATURE in "${FEATURE_LIST[@]}"; do

@@ -34,7 +34,74 @@ from src.patching.collect_activations import (
     _score_prediction,
     _MAX_NEW_TOKENS,
 )
-from src.vlm import VLMAdapter, prepare_inputs
+from src.vlm import (
+    VLMAdapter,
+    prepare_inputs,
+    prepare_qwen_fused_inputs_embeds,
+    qwen_patching_max_new_tokens,
+    qwen_vision_cache_context,
+    strip_qwen_thinking_prefix,
+)
+
+
+_QWEN_THINK_END_ID = 248069   # '</think>'
+_QWEN_DOUBLE_NEWLINE = 271    # '\n\n' token commonly emitted after </think>
+_QWEN_SINGLE_NEWLINE = 198    # '\n'
+
+
+def _qwen_post_generate(
+    vlm_adapter: VLMAdapter,
+    gen_ids: torch.Tensor,
+    gen_step_logits: torch.Tensor,
+    processor: Any,
+) -> Tuple[torch.Tensor, torch.Tensor, str]:
+    """For Qwen, strip the leading '<think>…</think>\\n\\n' preamble from
+    gen_ids / gen_step_logits / raw_text so downstream consumers see the
+    real first answer token at position 0. No-op for other families."""
+    if vlm_adapter.family == "qwen" and gen_ids.shape[1] > 0:
+        token_list = gen_ids[0].tolist()
+        if _QWEN_THINK_END_ID in token_list:
+            offset = token_list.index(_QWEN_THINK_END_ID) + 1
+            while offset < len(token_list) and token_list[offset] in (
+                _QWEN_DOUBLE_NEWLINE,
+                _QWEN_SINGLE_NEWLINE,
+            ):
+                offset += 1
+            gen_ids = gen_ids[:, offset:]
+            gen_step_logits = gen_step_logits[:, offset:, :]
+
+    raw_text = processor.batch_decode(gen_ids, skip_special_tokens=True)[0].strip()
+    if vlm_adapter.family == "qwen":
+        raw_text = strip_qwen_thinking_prefix(raw_text)
+    return gen_ids, gen_step_logits, raw_text
+
+
+def _token_piece(processor: Any, token_id: int) -> str:
+    return processor.tokenizer.decode([int(token_id)], skip_special_tokens=False)
+
+
+def _answer_token_indices(gen_ids: torch.Tensor, processor: Any) -> List[int]:
+    """Indices of generated tokens that form the visible evaluated answer.
+
+    Generation can begin with formatting tokens that disappear under decoding
+    and ``strip()`` (e.g. LLaVA's leading SentencePiece whitespace token).
+    We trim those from the confidence calculation, along with special tokens.
+    Internal tokens are retained so multi-token answers keep their full
+    length-normalized likelihood.
+    """
+    if gen_ids.ndim != 2 or gen_ids.shape[0] == 0:
+        return []
+
+    token_ids = [int(t) for t in gen_ids[0].tolist()]
+    special_ids = set(getattr(processor.tokenizer, "all_special_ids", []) or [])
+    keep = [idx for idx, token_id in enumerate(token_ids) if token_id not in special_ids]
+
+    while keep and _token_piece(processor, token_ids[keep[0]]).strip() == "":
+        keep.pop(0)
+    while keep and _token_piece(processor, token_ids[keep[-1]]).strip() == "":
+        keep.pop()
+
+    return keep
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +179,8 @@ def _patched_generate(
     layer_idx: int,
     positions: List[int],
     clean_activations: torch.Tensor,
+    fused_bundle: Optional[Dict[str, torch.Tensor]] = None,
+    qwen_prefill_empty_thinking: bool = False,
 ) -> Dict[str, Any]:
     """Run model.generate() while patching hidden states at one layer.
 
@@ -120,11 +189,29 @@ def _patched_generate(
         positions: token positions to replace (list of ints).
         clean_activations: tensor of shape (len(positions), H) with the
             clean hidden states to inject.
+        fused_bundle: optional pre-computed fused inputs (from
+            ``prepare_qwen_fused_inputs_embeds``). When provided, we call
+            ``generate(inputs_embeds=...)`` directly and skip the vision
+            tower. Only supported for Qwen — the caller is responsible for
+            supplying this only when ``vlm_adapter.family == "qwen"``.
+            Gives ~30-40x speedup on Qwen patching by avoiding the vision
+            tower rerun on every condition.
 
-    Returns dict with raw_text, gen_step_logits (for entropy / top-1 prob).
+    Returns dict with raw_text, gen_ids, gen_step_logits.
     """
-    inputs = prepare_inputs(vlm_adapter, processor, image, prompt, device)
-    prompt_len = int(inputs["input_ids"].shape[1])
+    if fused_bundle is not None:
+        inputs = fused_bundle["inputs"]
+        prompt_len = int(fused_bundle["prompt_len"])
+    else:
+        inputs = prepare_inputs(
+            vlm_adapter,
+            processor,
+            image,
+            prompt,
+            device,
+            qwen_prefill_empty_thinking=qwen_prefill_empty_thinking,
+        )
+        prompt_len = int(inputs["input_ids"].shape[1])
 
     decoder_layers = _get_decoder_layers(model, vlm_adapter)
     target_layer = decoder_layers[layer_idx]
@@ -164,9 +251,14 @@ def _patched_generate(
 
     handle = target_layer.register_forward_hook(_hook)
     try:
+        effective_max_new_tokens = (
+            max_new_tokens
+            if vlm_adapter.family == "qwen" and qwen_prefill_empty_thinking
+            else qwen_patching_max_new_tokens(vlm_adapter, max_new_tokens)
+        )
         generate_kwargs = dict(
             **inputs,
-            max_new_tokens=max_new_tokens,
+            max_new_tokens=effective_max_new_tokens,
             do_sample=False,
             return_dict_in_generate=True,
             output_scores=True,
@@ -174,7 +266,11 @@ def _patched_generate(
         if vlm_adapter.family == "molmo":
             generate_kwargs["use_cache"] = False
 
-        out = model.generate(**generate_kwargs)
+        if fused_bundle is not None:
+            with qwen_vision_cache_context(model, fused_bundle):
+                out = model.generate(**generate_kwargs)
+        else:
+            out = model.generate(**generate_kwargs)
     finally:
         handle.remove()
 
@@ -183,10 +279,13 @@ def _patched_generate(
         torch.stack(out.scores, dim=1) if len(out.scores) > 0
         else torch.empty((1, 0, model.config.vocab_size), device=device)
     )
-    raw_text = processor.batch_decode(gen_ids, skip_special_tokens=True)[0].strip()
+    gen_ids, gen_step_logits, raw_text = _qwen_post_generate(
+        vlm_adapter, gen_ids, gen_step_logits, processor
+    )
 
     return {
         "raw_text": raw_text,
+        "gen_ids": gen_ids,
         "gen_step_logits": gen_step_logits,
     }
 
@@ -195,17 +294,91 @@ def _patched_generate(
 # Output distribution helpers (reused from collect_activations pattern)
 # ---------------------------------------------------------------------------
 
-def _compute_output_stats(gen_step_logits: torch.Tensor) -> Dict[str, float]:
-    """Compute top-1 probability and entropy from the first generated token."""
+def _compute_output_stats(
+    gen_step_logits: torch.Tensor,
+    gen_ids: Optional[torch.Tensor] = None,
+    processor: Any = None,
+) -> Dict[str, Any]:
+    """Compute output confidence from the visible answer tokens.
+
+    ``top1_probability`` is intentionally the answer-level confidence used by
+    plots: the geometric mean of probabilities assigned to generated tokens
+    that survive decoding/postprocessing. The older first-generated-token
+    quantity is retained as ``first_generated_token_top1_probability``.
+    """
     if gen_step_logits.shape[1] == 0:
-        return {"top1_probability": 0.0, "output_entropy": 0.0}
+        return {
+            "top1_probability": 0.0,
+            "output_entropy": 0.0,
+            "answer_geom_mean_probability": 0.0,
+            "answer_mean_logprob": 0.0,
+            "answer_min_token_probability": 0.0,
+            "answer_first_token_probability": 0.0,
+            "answer_token_count": 0,
+            "answer_token_ids": "[]",
+            "answer_token_text": "",
+            "first_generated_token_top1_probability": 0.0,
+            "first_generated_token_entropy": 0.0,
+        }
 
     first_logits = gen_step_logits[0, 0, :].float()
-    probs = F.softmax(first_logits, dim=0)
-    top1_prob = float(probs.max().item())
-    entropy = float(-(probs * torch.log(probs + 1e-10)).sum().item())
+    first_probs = F.softmax(first_logits, dim=0)
+    first_top1_prob = float(first_probs.max().item())
+    first_entropy = float(-(first_probs * torch.log(first_probs + 1e-10)).sum().item())
 
-    return {"top1_probability": top1_prob, "output_entropy": entropy}
+    if gen_ids is None or processor is None:
+        return {
+            "top1_probability": first_top1_prob,
+            "output_entropy": first_entropy,
+            "answer_geom_mean_probability": first_top1_prob,
+            "answer_mean_logprob": float(torch.log(first_probs.max() + 1e-10).item()),
+            "answer_min_token_probability": first_top1_prob,
+            "answer_first_token_probability": first_top1_prob,
+            "answer_token_count": 1,
+            "answer_token_ids": "[]",
+            "answer_token_text": "",
+            "first_generated_token_top1_probability": first_top1_prob,
+            "first_generated_token_entropy": first_entropy,
+        }
+
+    answer_indices = [
+        idx for idx in _answer_token_indices(gen_ids, processor)
+        if idx < gen_step_logits.shape[1]
+    ]
+    if not answer_indices:
+        answer_indices = [0]
+
+    token_probs: List[float] = []
+    token_logprobs: List[float] = []
+    token_entropies: List[float] = []
+    token_ids: List[int] = []
+    token_texts: List[str] = []
+    for idx in answer_indices:
+        token_id = int(gen_ids[0, idx].item())
+        probs = F.softmax(gen_step_logits[0, idx, :].float(), dim=0)
+        prob = float(probs[token_id].item())
+        token_probs.append(prob)
+        token_logprobs.append(float(torch.log(probs[token_id] + 1e-10).item()))
+        token_entropies.append(float(-(probs * torch.log(probs + 1e-10)).sum().item()))
+        token_ids.append(token_id)
+        token_texts.append(_token_piece(processor, token_id))
+
+    mean_logprob = sum(token_logprobs) / len(token_logprobs)
+    geom_mean_prob = float(torch.exp(torch.tensor(mean_logprob)).item())
+
+    return {
+        "top1_probability": geom_mean_prob,
+        "output_entropy": token_entropies[0],
+        "answer_geom_mean_probability": geom_mean_prob,
+        "answer_mean_logprob": mean_logprob,
+        "answer_min_token_probability": min(token_probs),
+        "answer_first_token_probability": token_probs[0],
+        "answer_token_count": len(token_ids),
+        "answer_token_ids": json.dumps(token_ids),
+        "answer_token_text": json.dumps(token_texts),
+        "first_generated_token_top1_probability": first_top1_prob,
+        "first_generated_token_entropy": first_entropy,
+    }
 
 
 
@@ -344,14 +517,36 @@ def _run_baseline_forward(
     image: Image.Image,
     prompt: str,
     max_new_tokens: int,
+    fused_bundle: Optional[Dict[str, torch.Tensor]] = None,
+    qwen_prefill_empty_thinking: bool = False,
 ) -> Dict[str, Any]:
-    """Run a normal (unpatched) forward pass and return text + logits."""
-    inputs = prepare_inputs(vlm_adapter, processor, image, prompt, device)
-    prompt_len = int(inputs["input_ids"].shape[1])
+    """Run a normal (unpatched) forward pass and return text + logits.
 
+    If ``fused_bundle`` is supplied (Qwen only), we skip the vision tower by
+    reusing pre-computed fused ``inputs_embeds``.
+    """
+    if fused_bundle is not None:
+        inputs = fused_bundle["inputs"]
+        prompt_len = int(fused_bundle["prompt_len"])
+    else:
+        inputs = prepare_inputs(
+            vlm_adapter,
+            processor,
+            image,
+            prompt,
+            device,
+            qwen_prefill_empty_thinking=qwen_prefill_empty_thinking,
+        )
+        prompt_len = int(inputs["input_ids"].shape[1])
+
+    effective_max_new_tokens = (
+        max_new_tokens
+        if vlm_adapter.family == "qwen" and qwen_prefill_empty_thinking
+        else qwen_patching_max_new_tokens(vlm_adapter, max_new_tokens)
+    )
     generate_kwargs = dict(
         **inputs,
-        max_new_tokens=max_new_tokens,
+        max_new_tokens=effective_max_new_tokens,
         do_sample=False,
         return_dict_in_generate=True,
         output_scores=True,
@@ -359,15 +554,26 @@ def _run_baseline_forward(
     if vlm_adapter.family == "molmo":
         generate_kwargs["use_cache"] = False
 
-    out = model.generate(**generate_kwargs)
+    if fused_bundle is not None:
+        with qwen_vision_cache_context(model, fused_bundle):
+            out = model.generate(**generate_kwargs)
+    else:
+        out = model.generate(**generate_kwargs)
+
     gen_ids = out.sequences[:, prompt_len:]
     gen_step_logits = (
         torch.stack(out.scores, dim=1) if len(out.scores) > 0
         else torch.empty((1, 0, model.config.vocab_size), device=device)
     )
-    raw_text = processor.batch_decode(gen_ids, skip_special_tokens=True)[0].strip()
+    gen_ids, gen_step_logits, raw_text = _qwen_post_generate(
+        vlm_adapter, gen_ids, gen_step_logits, processor
+    )
 
-    return {"raw_text": raw_text, "gen_step_logits": gen_step_logits}
+    return {
+        "raw_text": raw_text,
+        "gen_ids": gen_ids,
+        "gen_step_logits": gen_step_logits,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -444,15 +650,26 @@ def run_activation_patching(
                 print(f"  [skip] {sample_id}: no patching conditions built")
             continue
 
+        # --- Qwen fast path: pre-compute fused inputs_embeds per image so the
+        # vision tower runs once instead of per-condition (30-40x speedup).
+        # For other VLMs, keep the original path — they have cheap vision towers.
+        use_fused = vlm_adapter.family == "qwen"
+
         # --- Run clean baseline (from clean image) ---
         clean_image = Image.open(record["clean_image_path"]).convert("RGB")
+        clean_fused = (
+            prepare_qwen_fused_inputs_embeds(model, vlm_adapter, processor, clean_image, prompt, device)
+            if use_fused else None
+        )
         clean_fwd = _run_baseline_forward(
             model=model, processor=processor, device=device,
             vlm_adapter=vlm_adapter, image=clean_image, prompt=prompt,
-            max_new_tokens=max_new_tokens,
+            max_new_tokens=max_new_tokens, fused_bundle=clean_fused,
         )
         clean_image.close()
-        clean_stats = _compute_output_stats(clean_fwd["gen_step_logits"])
+        clean_stats = _compute_output_stats(
+            clean_fwd["gen_step_logits"], clean_fwd.get("gen_ids"), processor
+        )
         clean_score = _score_prediction(cfg.dataset_id, clean_fwd["raw_text"], record)
 
         # --- For each severity level ---
@@ -464,14 +681,20 @@ def run_activation_patching(
                 continue
 
             blurred_image = Image.open(img_path).convert("RGB")
+            blurred_fused = (
+                prepare_qwen_fused_inputs_embeds(model, vlm_adapter, processor, blurred_image, prompt, device)
+                if use_fused else None
+            )
 
             # Degraded baseline (no patching)
             deg_fwd = _run_baseline_forward(
                 model=model, processor=processor, device=device,
                 vlm_adapter=vlm_adapter, image=blurred_image, prompt=prompt,
-                max_new_tokens=max_new_tokens,
+                max_new_tokens=max_new_tokens, fused_bundle=blurred_fused,
             )
-            deg_stats = _compute_output_stats(deg_fwd["gen_step_logits"])
+            deg_stats = _compute_output_stats(
+                deg_fwd["gen_step_logits"], deg_fwd.get("gen_ids"), processor
+            )
             deg_score = _score_prediction(cfg.dataset_id, deg_fwd["raw_text"], record)
 
             # Record baselines
@@ -481,8 +704,7 @@ def run_activation_patching(
                 "condition": "degraded",
                 "predicted_answer": deg_fwd["raw_text"],
                 "score": deg_score,
-                "top1_probability": deg_stats["top1_probability"],
-                "output_entropy": deg_stats["output_entropy"],
+                **deg_stats,
             })
             rows.append({
                 "sample_id": sample_id,
@@ -490,8 +712,7 @@ def run_activation_patching(
                 "condition": "clean",
                 "predicted_answer": clean_fwd["raw_text"],
                 "score": clean_score,
-                "top1_probability": clean_stats["top1_probability"],
-                "output_entropy": clean_stats["output_entropy"],
+                **clean_stats,
             })
 
             # --- Run each patching condition ---
@@ -503,8 +724,11 @@ def run_activation_patching(
                     layer_idx=cond.layer_idx,
                     positions=cond.positions,
                     clean_activations=cond.activations,
+                    fused_bundle=blurred_fused,
                 )
-                patched_stats = _compute_output_stats(patched_fwd["gen_step_logits"])
+                patched_stats = _compute_output_stats(
+                    patched_fwd["gen_step_logits"], patched_fwd.get("gen_ids"), processor
+                )
                 patched_score = _score_prediction(
                     cfg.dataset_id, patched_fwd["raw_text"], record,
                 )
@@ -515,8 +739,7 @@ def run_activation_patching(
                     "condition": cond.name,
                     "predicted_answer": patched_fwd["raw_text"],
                     "score": patched_score,
-                    "top1_probability": patched_stats["top1_probability"],
-                    "output_entropy": patched_stats["output_entropy"],
+                    **patched_stats,
                 })
 
                 if cfg.verbose:

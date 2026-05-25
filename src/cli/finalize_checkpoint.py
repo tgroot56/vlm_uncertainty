@@ -58,6 +58,7 @@ def finalize_checkpoint(
     seed_offset: int,
     max_samples: int | None,
     expected_samples: int | None,
+    limit_samples: int | None,
 ) -> None:
     checkpoint = _load_checkpoint(checkpoint_path)
     _validate_checkpoint(checkpoint, expected_samples)
@@ -66,7 +67,18 @@ def finalize_checkpoint(
 
     feature_names = checkpoint["feature_names"]
     feature_dims = checkpoint.get("feature_dims", [])
-    x_parts = checkpoint["X_parts"]
+    total_checkpoint_samples = len(checkpoint["X_parts"])
+    if limit_samples is not None:
+        if limit_samples <= 0:
+            raise ValueError("--limit-samples must be positive.")
+        if limit_samples > total_checkpoint_samples:
+            raise ValueError(
+                f"Requested --limit-samples {limit_samples}, but checkpoint only has "
+                f"{total_checkpoint_samples} samples."
+            )
+        print(f"Truncating checkpoint to first {limit_samples} samples.")
+    limit = limit_samples or total_checkpoint_samples
+    x_parts = checkpoint["X_parts"][:limit]
 
     print("Building final feature tensor with torch.cat(...).")
     print("This is the memory-heavy recovery step; no VLM/model forward passes are run.")
@@ -77,8 +89,8 @@ def finalize_checkpoint(
     del x_parts
     gc.collect()
 
-    y = torch.tensor(checkpoint["y_list"], dtype=torch.float32)
-    rows = checkpoint["rows"]
+    y = torch.tensor(checkpoint["y_list"][:limit], dtype=torch.float32)
+    rows = checkpoint["rows"][:limit]
 
     metadata = {
         "dataset_id": dataset_id,
@@ -92,6 +104,8 @@ def finalize_checkpoint(
         "label_mean": float(y.mean().item()),
         "label_variance": float(y.var(unbiased=False).item()),
         "recovered_from_checkpoint": str(checkpoint_path),
+        "checkpoint_num_samples": total_checkpoint_samples,
+        "limit_samples": limit_samples,
     }
 
     print(f"Saving finalized dataset: {output_path}")
@@ -129,6 +143,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--expected-samples", type=int, default=None)
     parser.add_argument(
+        "--limit-samples",
+        type=int,
+        default=None,
+        help="Use only the first N samples from the checkpoint when finalizing.",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Allow replacing an existing output dataset.",
@@ -151,6 +171,7 @@ def main() -> None:
         seed_offset=args.seed_offset,
         max_samples=args.max_samples,
         expected_samples=args.expected_samples,
+        limit_samples=args.limit_samples,
     )
 
 

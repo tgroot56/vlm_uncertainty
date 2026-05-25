@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LLaVA VQA-v2 Answer-Confidence Browser</title>
+  <style>
+    :root { color-scheme: light; --bg:#f6f7f9; --panel:#fff; --ink:#17202a; --muted:#647084; --line:#d9dee7; --accent:#0f766e; --accent-soft:#d9f4ef; --bad:#b42318; --good:#067647; --warn:#a15c07; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:var(--bg); color:var(--ink); }
+    header { padding:16px 22px; background:var(--panel); border-bottom:1px solid var(--line); display:flex; align-items:center; justify-content:space-between; gap:16px; }
+    h1 { font-size:18px; line-height:1.2; margin:0; font-weight:650; }
+    .sub { color:var(--muted); font-size:13px; margin-top:4px; }
+    .layout { display:grid; grid-template-columns:440px minmax(0,1fr); min-height:calc(100vh - 74px); }
+    aside { border-right:1px solid var(--line); background:var(--panel); min-height:0; display:flex; flex-direction:column; }
+    .controls { padding:14px; border-bottom:1px solid var(--line); display:grid; gap:10px; }
+    input, select { width:100%; min-height:36px; border:1px solid var(--line); border-radius:6px; padding:0 10px; font-size:14px; background:#fff; color:var(--ink); }
+    .filter-grid { display:grid; grid-template-columns:1fr; gap:8px; }
+    .matrix { border:1px solid var(--line); border-radius:8px; overflow:hidden; background:#fff; }
+    .matrix table { border:0; border-radius:0; }
+    .matrix td, .matrix th { font-size:12px; padding:8px; }
+    .matrix button { width:100%; border:1px solid var(--line); background:#fff; border-radius:5px; padding:7px; cursor:pointer; font-variant-numeric:tabular-nums; color:var(--ink); }
+    .matrix button:hover, .matrix button.active-cell { border-color:var(--accent); background:var(--accent-soft); }
+    .clear { height:34px; border:1px solid var(--line); border-radius:6px; background:#fff; cursor:pointer; color:var(--ink); }
+    .list { overflow:auto; padding:8px; }
+    .item { width:100%; text-align:left; border:1px solid transparent; border-radius:6px; background:transparent; padding:10px; cursor:pointer; display:grid; gap:5px; color:var(--ink); }
+    .item:hover { background:#f3f6f8; } .item.active { border-color:var(--accent); background:var(--accent-soft); }
+    .item-title { font-size:13px; font-weight:650; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .item-meta { display:flex; justify-content:space-between; gap:8px; font-size:12px; color:var(--muted); }
+    .dataset-pill { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:2px 7px; font-size:11px; color:var(--muted); background:#fff; }
+    main { padding:18px; overflow:auto; }
+    .detail { display:grid; gap:16px; max-width:1240px; margin:0 auto; }
+    .question { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px; }
+    .question h2 { font-size:20px; margin:0 0 10px; line-height:1.3; white-space:pre-wrap; }
+    .facts { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; }
+    .fact { border:1px solid var(--line); border-radius:6px; padding:10px; background:#fbfcfd; }
+    .label { color:var(--muted); font-size:12px; margin-bottom:4px; }
+    .value { font-size:14px; font-weight:620; overflow-wrap:anywhere; }
+    .images { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+    figure { margin:0; background:var(--panel); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+    figcaption { padding:10px 12px; font-size:13px; color:var(--muted); border-bottom:1px solid var(--line); }
+    img { width:100%; height:430px; display:block; object-fit:contain; background:#eef1f5; }
+    table { width:100%; border-collapse:collapse; background:var(--panel); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+    th, td { padding:11px 12px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; font-size:14px; }
+    th { background:#f8fafc; color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.02em; }
+    tr:last-child td { border-bottom:0; }
+    .prob, .score { font-variant-numeric:tabular-nums; } .good { color:var(--good); font-weight:650; } .bad { color:var(--bad); font-weight:650; } .warn { color:var(--warn); font-weight:650; }
+    @media (max-width:980px){ .layout{grid-template-columns:1fr;} aside{max-height:560px;border-right:0;border-bottom:1px solid var(--line);} .facts,.images{grid-template-columns:1fr;} img{height:320px;} }
+  </style>
+</head>
+<body>
+  <header><div><h1 id="appTitle">LLaVA VQA-v2 Answer-Confidence Browser</h1><div class="sub" id="subtitle">Loading samples...</div></div></header>
+  <div class="layout">
+    <aside>
+      <div class="controls">
+        <input id="search" type="search" placeholder="Search question, answer, sample id" />
+        <div class="filter-grid">
+          <select id="datasetFilter"><option value="">All datasets</option></select>
+          <select id="probFilter"><option value="">All decoded-answer probability rows</option></select>
+          <select id="scoreFilter"><option value="">All correctness score columns</option></select>
+        </div>
+        <button class="clear" id="clearFilters">Clear filters</button>
+        <div class="matrix" id="matrix"></div>
+      </div>
+      <div class="list" id="list"></div>
+    </aside>
+    <main><section class="detail" id="detail"></section></main>
+  </div>
+<script>
+let samples = [], filtered = [], selectedIndex = 0, dataMeta = null;
+const fmt = (x) => Number(x).toFixed(4);
+const pct = (count,total) => `${count} (${total ? (100*count/total).toFixed(1) : '0.0'}%)`;
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const imageUrl = (sample, kind) => `image/${encodeURIComponent(sample.uid)}?kind=${kind}`;
+function row(label, answer, score, prob) { const cls=Number(score)>0?'good':'bad'; return `<tr><td>${label}</td><td>${esc(answer)}</td><td class="score ${cls}">${fmt(score)}</td><td class="prob">${fmt(prob)}</td></tr>`; }
+function populateSelect(id, values) { const el=document.getElementById(id); values.forEach(v => { const o=document.createElement('option'); o.value=v; o.textContent=v; el.appendChild(o); }); }
+function currentDatasetKey(){ return document.getElementById('datasetFilter').value || 'all'; }
+function renderMatrix() {
+  const dsKey = currentDatasetKey();
+  const matrix = dataMeta.matrix_by_dataset[dsKey];
+  const total = samples.filter(s => dsKey === 'all' || s.dataset === dsKey).length;
+  let html = '<table><thead><tr><th>Decoded-answer prob relation</th>' + dataMeta.score_order.map(c=>`<th>${esc(c)}</th>`).join('') + '</tr></thead><tbody>';
+  for (const row of matrix) {
+    html += `<tr><th>${esc(row.prob_relation)}</th>`;
+    for (const col of dataMeta.score_order) {
+      const active = document.getElementById('probFilter').value===row.prob_relation && document.getElementById('scoreFilter').value===col;
+      html += `<td><button class="${active?'active-cell':''}" data-prob="${esc(row.prob_relation)}" data-score="${esc(col)}">${pct(row[col], total)}</button></td>`;
+    }
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+  document.getElementById('matrix').innerHTML = html;
+  document.querySelectorAll('#matrix button').forEach(btn => btn.addEventListener('click', () => {
+    document.getElementById('probFilter').value = btn.dataset.prob;
+    document.getElementById('scoreFilter').value = btn.dataset.score;
+    applyFilters();
+  }));
+}
+function renderList() {
+  const list=document.getElementById('list');
+  list.innerHTML = filtered.map((s,i)=>`<button class="item ${i===selectedIndex?'active':''}" data-index="${i}"><div><span class="dataset-pill">${esc(s.dataset)}</span></div><div class="item-title">${esc(s.question)}</div><div class="item-meta"><span>${esc(s.sample_id)}</span><span>Δ answer-prob 31-25 ${fmt(s.top1_delta_31_minus_25)}</span></div><div class="item-meta"><span>${esc(s.prob_relation_0p05)}</span></div><div class="item-meta"><span>${esc(s.score_relation)}</span></div></button>`).join('');
+  list.querySelectorAll('.item').forEach(btn=>btn.addEventListener('click',()=>{selectedIndex=Number(btn.dataset.index);render();}));
+}
+function renderDetail() {
+  const s=filtered[selectedIndex]; const detail=document.getElementById('detail');
+  if(!s){detail.innerHTML='<div class="question">No matching samples.</div>';return;}
+  const deltaClass = Number(s.top1_delta_31_minus_25)>0.05 ? 'good' : Number(s.top1_delta_31_minus_25)<-0.05 ? 'bad' : 'warn';
+  detail.innerHTML = `<div class="question"><h2>${esc(s.question)}</h2><div class="facts"><div class="fact"><div class="label">Dataset</div><div class="value">${esc(s.dataset)}</div></div><div class="fact"><div class="label">Sample ID</div><div class="value">${esc(s.sample_id)}</div></div><div class="fact"><div class="label">Most common GT</div><div class="value">${esc(s.most_common_gt_answer)}</div></div><div class="fact"><div class="label">Final layer</div><div class="value">${esc(s.final_layer)}</div></div><div class="fact"><div class="label">Decoded-answer prob relation</div><div class="value">${esc(s.prob_relation_0p05)}</div></div><div class="fact"><div class="label">Score relation</div><div class="value">${esc(s.score_relation)}</div></div><div class="fact"><div class="label">Final - L25 decoded-answer prob</div><div class="value ${deltaClass}">${fmt(s.top1_delta_31_minus_25)}</div></div><div class="fact"><div class="label">Final - L25 score</div><div class="value">${fmt(s.score_delta_31_minus_25)}</div></div><div class="fact"><div class="label">All GT answers</div><div class="value">${esc(s.all_gt_answers)}</div></div></div></div><div class="images"><figure><figcaption>Clean image</figcaption><img src="${imageUrl(s,'clean')}" alt="Clean image" /></figure><figure><figcaption>Corrupted image</figcaption><img src="${imageUrl(s,'corrupted')}" alt="Corrupted image" /></figure></div><table><thead><tr><th>Run</th><th>Answer</th><th>Correctness score</th><th>Decoded-answer probability</th></tr></thead><tbody>${row('Clean',s.clean_answer,s.clean_correctness_score,s.clean_top1_probability)}${row('Corrupted',s.corrupted_answer,s.corrupted_correctness_score,s.corrupted_top1_probability)}${row('Patched layer 25',s.patched_layer25_answer,s.patched_layer25_correctness_score,s.patched_layer25_top1_probability)}${row('Patched final layer '+s.final_layer,s.patched_layer31_answer,s.patched_layer31_correctness_score,s.patched_layer31_top1_probability)}</tbody></table>`;
+}
+function render(){ renderMatrix(); renderList(); renderDetail(); document.getElementById('subtitle').textContent = `${filtered.length} of ${samples.length} samples shown`; }
+function applyFilters(){
+  const q=document.getElementById('search').value.trim().toLowerCase(); const ds=document.getElementById('datasetFilter').value; const pr=document.getElementById('probFilter').value; const sr=document.getElementById('scoreFilter').value;
+  filtered=samples.filter(s=>(!ds||s.dataset===ds)&&(!pr||s.prob_relation_0p05===pr)&&(!sr||s.score_relation===sr)&&(!q||[s.dataset,s.sample_id,s.question,s.most_common_gt_answer,s.all_gt_answers,s.clean_answer,s.corrupted_answer,s.patched_layer25_answer,s.patched_layer31_answer].some(v=>String(v??'').toLowerCase().includes(q))));
+  selectedIndex=0; render();
+}
+fetch('samples.json').then(r=>r.json()).then(data=>{ dataMeta=data; samples=data.samples; filtered=samples; document.getElementById('appTitle').textContent=data.title || 'LLaVA VQA-v2 Answer-Confidence Browser'; populateSelect('datasetFilter', data.datasets); populateSelect('probFilter', data.prob_order); populateSelect('scoreFilter', data.score_order); ['search','datasetFilter','probFilter','scoreFilter'].forEach(id=>document.getElementById(id).addEventListener('input',applyFilters)); document.getElementById('clearFilters').addEventListener('click',()=>{document.getElementById('search').value='';document.getElementById('datasetFilter').value='';document.getElementById('probFilter').value='';document.getElementById('scoreFilter').value='';applyFilters();}); render(); });
+</script>
+</body>
+</html>

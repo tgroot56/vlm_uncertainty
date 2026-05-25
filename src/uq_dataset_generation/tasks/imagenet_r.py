@@ -35,7 +35,7 @@ class ImageNetRTask:
 
         return dataset_kwargs
 
-    def predict_kwargs(self, sample: Dict[str, Any]) -> Dict[str, Any]:
+    def predict_kwargs(self, sample: Dict[str, Any], vlm_adapter: Any = None) -> Dict[str, Any]:
         option_keys = list(sample["option_map"].keys())
         return {"prompt": sample["prompt"], "option_letters": option_keys}
 
@@ -44,6 +44,8 @@ class ImageNetRTask:
         *,
         sample: Dict[str, Any],
         prediction_output: Tuple[Any, ...],
+        vlm_adapter: Any = None,
+        tokenizer: Any = None,
     ) -> Dict[str, Any]:
         """
         Expects the "with_features" MC output of length 11:

@@ -57,6 +57,22 @@ def load_dataset_prepared(
         if cached_any is not None:
             return cached_any
 
+    if spec.hf_name is None:
+        split_obj = None
+        print(f"Preparing local dataset: dataset_id={dataset_id}, split={split}")
+        samples = spec.prepare_split(
+            split_obj,
+            seed_offset=seed_offset,
+            max_samples=max_samples,
+            **dataset_kwargs,
+        )
+        print(f"Dataset preparation complete. Processed {len(samples)} samples.")
+
+        if use_cache and max_samples is None:
+            save_cache(samples, dataset_id, split, seed_offset, dataset_kwargs)
+
+        return samples
+
     ds = load_hf_dataset(spec.hf_name, spec.hf_config)
     split_obj = ds[split]
 

@@ -22,11 +22,24 @@ mkdir -p slurm_outputs/recovery
 RUN_DIR="${RUN_DIR:-/projects/prjs2014/llava/layer_experiment/imagenet-r/llava-hf/llava-1.5-7b-hf/run_1b519a1811}"
 CHECKPOINT_PATH="${CHECKPOINT_PATH:-$RUN_DIR/checkpoint.pt}"
 OUTPUT_PATH="${OUTPUT_PATH:-$RUN_DIR/supervision_dataset.pt}"
+LIMIT_SAMPLES="${LIMIT_SAMPLES:-}"
+EXPECTED_SAMPLES="${EXPECTED_SAMPLES:-30000}"
 
-srun python -u -m src.cli.finalize_checkpoint \
-  --checkpoint-path "$CHECKPOINT_PATH" \
-  --output-path "$OUTPUT_PATH" \
-  --dataset-id imagenet-r \
-  --model-id llava-hf/llava-1.5-7b-hf \
-  --seed-offset 42 \
-  --expected-samples 30000
+ARGS=(
+  python -u -m src.cli.finalize_checkpoint
+  --checkpoint-path "$CHECKPOINT_PATH"
+  --output-path "$OUTPUT_PATH"
+  --dataset-id imagenet-r
+  --model-id llava-hf/llava-1.5-7b-hf
+  --seed-offset 42
+)
+
+if [[ -n "$EXPECTED_SAMPLES" ]]; then
+  ARGS+=(--expected-samples "$EXPECTED_SAMPLES")
+fi
+
+if [[ -n "$LIMIT_SAMPLES" ]]; then
+  ARGS+=(--limit-samples "$LIMIT_SAMPLES" --max-samples "$LIMIT_SAMPLES")
+fi
+
+srun "${ARGS[@]}"

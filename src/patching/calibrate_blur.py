@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+from PIL import Image
 from tqdm import tqdm
 
 from src.patching.perturbations import apply_gaussian_blur
@@ -38,6 +39,23 @@ _DROP_TARGETS: Dict[str, float] = {
     "moderate": 0.15,
     "severe":   0.30,
 }
+
+# Fixed sigma for the "extreme" severity level — not calibrated. A Gaussian
+# blur of this magnitude collapses the input image to an effectively uniform
+# colour field, removing all actionable visual information.
+EXTREME_BLUR_SIGMA: float = 50.0
+
+
+def _prepare_image_for_png(image: Image.Image) -> Image.Image:
+    """Convert non-PNG-friendly PIL modes to RGB before saving."""
+    if image.mode == "RGB":
+        return image
+    if image.mode in {"RGBA", "LA"}:
+        background = Image.new("RGB", image.size, (255, 255, 255))
+        alpha = image.getchannel("A")
+        background.paste(image.convert("RGB"), mask=alpha)
+        return background
+    return image.convert("RGB")
 
 
 def _score_sample(pred_answer: str, sample: Dict[str, Any], dataset_id: str = "") -> float:
@@ -76,18 +94,26 @@ def _predict_open_ended(
     max_new_tokens: int = 4,
 ) -> str:
     """Run a lightweight greedy decode (no feature extraction needed)."""
-    from src.vlm import prepare_inputs
+    from src.vlm import (
+        prepare_inputs,
+        qwen_patching_max_new_tokens,
+        strip_qwen_thinking_prefix,
+    )
 
     inputs = prepare_inputs(vlm_adapter, processor, image, prompt, device)
+    effective_max_new_tokens = qwen_patching_max_new_tokens(vlm_adapter, max_new_tokens)
     out = model.generate(
         **inputs,
-        max_new_tokens=max_new_tokens,
+        max_new_tokens=effective_max_new_tokens,
         do_sample=False,
         return_dict_in_generate=True,
     )
     prompt_len = inputs["input_ids"].shape[1]
     gen_ids = out.sequences[:, prompt_len:]
-    return processor.batch_decode(gen_ids, skip_special_tokens=True)[0].strip()
+    raw_text = processor.batch_decode(gen_ids, skip_special_tokens=True)[0].strip()
+    if vlm_adapter.family == "qwen":
+        raw_text = strip_qwen_thinking_prefix(raw_text)
+    return raw_text
 
 
 def _select_best_sigma(
@@ -268,7 +294,7 @@ def save_blur_examples(
 
         # Clean
         clean_path = os.path.join(examples_dir, f"{sample_tag}_clean.png")
-        image.save(clean_path)
+        _prepare_image_for_png(image).save(clean_path)
 
         # One blurred version per severity
         for severity in severities:
@@ -277,7 +303,7 @@ def save_blur_examples(
                 continue
             blurred = apply_gaussian_blur(image, sigma=float(sigma))
             fname = f"{sample_tag}_{severity}_sigma{int(sigma)}.png"
-            blurred.save(os.path.join(examples_dir, fname))
+            _prepare_image_for_png(blurred).save(os.path.join(examples_dir, fname))
 
         print(
             f"[calibrate] Saved blur examples for {sample_tag} "

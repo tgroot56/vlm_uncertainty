@@ -107,6 +107,15 @@ def resolve_image(sample: Dict[str, Any]) -> Any:
             return img
         return img
 
+    if sample.get("image_path"):
+        image_path = sample["image_path"]
+        if Image is None:
+            return image_path
+        if not os.path.exists(image_path):
+            raise ValueError(f"Image path does not exist: {image_path}")
+        with Image.open(image_path) as img:
+            return img.convert("RGB")
+
     # 2) VQA special-case
     if sample.get("dataset_id") == "vqa-v2":
         return _resolve_vqa_image(sample)

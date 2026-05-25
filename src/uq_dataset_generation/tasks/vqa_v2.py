@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
 from src.labeling.vqa import score_vqa
+from src.vlm import strip_qwen_thinking_prefix
 
 
 @dataclass(frozen=True)
@@ -21,14 +22,19 @@ class VQAv2Task:
     def dataset_load_kwargs(self, args: Any, device: Any) -> Dict[str, Any]:
         return {}
 
-    def predict_kwargs(self, sample: Dict[str, Any]) -> Dict[str, Any]:
-        return {"prompt": sample["prompt"]}
+    def predict_kwargs(self, sample: Dict[str, Any], vlm_adapter: Any = None) -> Dict[str, Any]:
+        kwargs = {"prompt": sample["prompt"]}
+        if getattr(vlm_adapter, "family", None) == "qwen":
+            kwargs["max_new_tokens"] = 15
+        return kwargs
 
     def interpret_output(
         self,
         *,
         sample: Dict[str, Any],
         prediction_output: Tuple[Any, ...],
+        vlm_adapter: Any = None,
+        tokenizer: Any = None,
     ) -> Dict[str, Any]:
         """
         Expects VQA output length 8:
@@ -49,8 +55,14 @@ class VQAv2Task:
             gen_step_logits,
         ) = prediction_output
 
+        scored_answer = (
+            strip_qwen_thinking_prefix(pred_answer)
+            if getattr(vlm_adapter, "family", None) == "qwen"
+            else pred_answer
+        )
+
         corr = score_vqa(
-            pred_answer=pred_answer,
+            pred_answer=scored_answer,
             gt_answers=sample.get("gt_answers"),
             gt_answer_single=sample.get("gt_answer"),
         )
@@ -59,7 +71,7 @@ class VQAv2Task:
             "idx": sample.get("idx"),
             "question_id": sample.get("question_id"),
             "image_id": sample.get("image_id"),
-            "pred_answer": pred_answer,
+            "pred_answer": scored_answer,
             "raw_text": pred_answer,
             "gt_answers": sample.get("gt_answers"),
             "token_spans": token_spans,

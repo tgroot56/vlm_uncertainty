@@ -36,7 +36,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-probe_results/llava/coco-qa-vi/baselines}"
 
 # DATA_SEARCH_ROOT="$DATA_ROOT/coco-qa-vi/$VLM_PATH"
 # DATA_PATH="${DATA_PATH:-$(find "$DATA_SEARCH_ROOT" -path '*/supervision_dataset.pt' | sort | tail -n 1)}"
-DATA_PATH="/projects/prjs2014/coco-qa-vi/llava-hf/llava-1.5-7b-hf/run_76f5fcd2cb/supervision_dataset.pt"
+DATA_PATH="${DATA_PATH:-/projects/prjs2014/coco-qa-vi/llava-hf/llava-1.5-7b-hf/run_76f5fcd2cb/supervision_dataset.pt}"
 
 # if [[ -z "$DATA_PATH" ]]; then
 #     echo "Could not find supervision dataset under: $DATA_SEARCH_ROOT" >&2
@@ -79,6 +79,11 @@ FEATURE_LIST=(
   answer_gen_entropy_mean
   answer_gen_entropy_std
 )
+
+if [[ -n "${FEATURE_LIST_OVERRIDE:-}" ]]; then
+  # shellcheck disable=SC2206
+  FEATURE_LIST=($FEATURE_LIST_OVERRIDE)
+fi
 
 echo "Using DATA_PATH=$DATA_PATH"
 

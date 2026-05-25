@@ -1,0 +1,17 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --job-name=qwen_pope_random_layers
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=12:00:00
+#SBATCH --mem=128G
+#SBATCH --output=slurm_outputs/qwen/pope_random_layer_experiment_%A.out
+
+export DATASET_ID="${DATASET_ID:-pope}"
+export DATASET_SPLIT="${DATASET_SPLIT:-random}"
+export DATASET_LABEL="${DATASET_LABEL:-POPE/random}"
+export OUTPUT_STEM="${OUTPUT_STEM:-qwen_pope_random_mlp_layer_brier}"
+
+exec bash "$HOME/vlm_uncertainty/scripts/qwen/coco-qa-vi/layer_experiment.job"

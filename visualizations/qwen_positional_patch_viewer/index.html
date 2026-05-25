@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Qwen Positional Patching Viewer</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f6f8;
+      --panel: #ffffff;
+      --ink: #151b23;
+      --muted: #637083;
+      --line: #d9dee7;
+      --soft: #eef2f6;
+      --accent: #6d28d9;
+      --accent-soft: #f0e7ff;
+      --good: #047857;
+      --bad: #b42318;
+      --warn: #9a6700;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    header {
+      min-height: 68px;
+      padding: 14px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--line);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 19px;
+      line-height: 1.15;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    .subtitle {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 390px minmax(0, 1fr);
+      min-height: calc(100vh - 68px);
+    }
+
+    aside {
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      background: var(--panel);
+      border-right: 1px solid var(--line);
+    }
+
+    .controls {
+      padding: 14px;
+      display: grid;
+      gap: 12px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .dataset-tabs {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    button, input, select {
+      font: inherit;
+      color: var(--ink);
+    }
+
+    .tab, .list-item, .clear {
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 7px;
+      cursor: pointer;
+    }
+
+    .tab {
+      min-height: 38px;
+      padding: 0 10px;
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    .tab:hover, .tab.active {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    input, select {
+      width: 100%;
+      min-height: 38px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #fff;
+      font-size: 14px;
+    }
+
+    .filter-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .clear {
+      min-height: 34px;
+      font-size: 13px;
+    }
+
+    .list {
+      overflow: auto;
+      padding: 8px;
+    }
+
+    .list-item {
+      width: 100%;
+      margin: 0 0 8px;
+      padding: 10px;
+      display: grid;
+      gap: 7px;
+      text-align: left;
+    }
+
+    .list-item:hover, .list-item.active {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .item-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 0 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .question-preview {
+      font-size: 13px;
+      line-height: 1.35;
+      max-height: 54px;
+      overflow: hidden;
+    }
+
+    .metric-line {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+
+    main {
+      min-width: 0;
+      overflow: auto;
+      padding: 18px;
+    }
+
+    .detail {
+      max-width: 1380px;
+      margin: 0 auto;
+      display: grid;
+      gap: 14px;
+    }
+
+    .summary {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      display: grid;
+      gap: 12px;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.35;
+      font-weight: 700;
+      letter-spacing: 0;
+      white-space: pre-wrap;
+    }
+
+    .facts {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .fact {
+      min-width: 0;
+      padding: 9px;
+      background: #fbfcfe;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+    }
+
+    .label {
+      margin-bottom: 4px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .value {
+      font-size: 14px;
+      font-weight: 680;
+      overflow-wrap: anywhere;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .images {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    figure {
+      margin: 0;
+      min-width: 0;
+      overflow: hidden;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+
+    figcaption {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 620;
+    }
+
+    img {
+      width: 100%;
+      height: 360px;
+      display: block;
+      object-fit: contain;
+      background: var(--soft);
+    }
+
+    .answers {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+
+    .answers th, .answers td {
+      padding: 11px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+      font-size: 14px;
+    }
+
+    .answers th {
+      background: #f8fafc;
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+
+    .answers tr:last-child td { border-bottom: 0; }
+    .num { font-variant-numeric: tabular-nums; }
+    .good { color: var(--good); }
+    .bad { color: var(--bad); }
+    .warn { color: var(--warn); }
+
+    .note {
+      padding: 11px 12px;
+      color: var(--muted);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+
+    @media (max-width: 1100px) {
+      .layout { grid-template-columns: 1fr; }
+      aside {
+        max-height: 560px;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .images { grid-template-columns: 1fr; }
+      img { height: 320px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Qwen Positional Patching Viewer</h1>
+      <div class="subtitle" id="subtitle">Loading examples...</div>
+    </div>
+    <span class="pill" id="runMeta">Layer 17 · extreme blur</span>
+  </header>
+
+  <div class="layout">
+    <aside>
+      <div class="controls">
+        <div class="dataset-tabs" id="datasetTabs"></div>
+        <input id="search" type="search" placeholder="Search answer, sample id, question" />
+        <div class="filter-row">
+          <select id="changeFilter">
+            <option value="">All answer changes</option>
+            <option value="changed">Answer changed</option>
+            <option value="same">Answer unchanged</option>
+          </select>
+          <select id="sortBy">
+            <option value="score">Sort by score gain</option>
+            <option value="confidence">Sort by confidence gain</option>
+            <option value="recovery">Sort by confidence recovery</option>
+          </select>
+        </div>
+        <button class="clear" id="clearFilters">Clear filters</button>
+      </div>
+      <div class="list" id="exampleList"></div>
+    </aside>
+
+    <main>
+      <section class="detail" id="detail"></section>
+    </main>
+  </div>
+
+  <script>
+    let payload = null;
+    let examples = [];
+    let filtered = [];
+    let activeDataset = "all";
+    let selectedIndex = 0;
+
+    const fmt = (x, digits = 3) => x === null || x === undefined || Number.isNaN(Number(x))
+      ? "n/a"
+      : Number(x).toFixed(digits);
+    const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[c]));
+    const deltaClass = (x) => Number(x) > 0.01 ? "good" : Number(x) < -0.01 ? "bad" : "warn";
+
+    function answerCell(label, answer, score, confidence, baseScore = null, baseConf = null) {
+      const scoreDelta = baseScore === null ? "" : `<span class="${deltaClass(score - baseScore)}"> (${score - baseScore >= 0 ? "+" : ""}${fmt(score - baseScore)})</span>`;
+      const confDelta = baseConf === null ? "" : `<span class="${deltaClass(confidence - baseConf)}"> (${confidence - baseConf >= 0 ? "+" : ""}${fmt(confidence - baseConf)})</span>`;
+      return `<tr>
+        <td>${esc(label)}</td>
+        <td>${esc(answer)}</td>
+        <td class="num">${fmt(score)}${scoreDelta}</td>
+        <td class="num">${fmt(confidence)}${confDelta}</td>
+      </tr>`;
+    }
+
+    function renderDatasetTabs() {
+      const tabs = document.getElementById("datasetTabs");
+      const total = examples.length;
+      const items = [{ id: "all", label: "All", count: total }, ...payload.datasets];
+      tabs.innerHTML = items.map(ds => `
+        <button class="tab ${activeDataset === ds.id ? "active" : ""}" data-dataset="${esc(ds.id)}">
+          ${esc(ds.label)} · ${ds.count}
+        </button>
+      `).join("");
+      tabs.querySelectorAll("button").forEach(button => {
+        button.addEventListener("click", () => {
+          activeDataset = button.dataset.dataset;
+          selectedIndex = 0;
+          applyFilters();
+        });
+      });
+    }
+
+    function renderList() {
+      const list = document.getElementById("exampleList");
+      list.innerHTML = filtered.map((ex, index) => `
+        <button class="list-item ${index === selectedIndex ? "active" : ""}" data-index="${index}">
+          <div class="item-top">
+            <span class="pill">${esc(ex.dataset_label)}</span>
+            <span>sample ${esc(ex.sample_id)}</span>
+          </div>
+          <div class="question-preview">${esc(ex.question)}</div>
+          <div class="metric-line">
+            <span>score Δ</span>
+            <strong class="${deltaClass(ex.score_delta)}">${ex.score_delta >= 0 ? "+" : ""}${fmt(ex.score_delta)}</strong>
+          </div>
+          <div class="metric-line">
+            <span>confidence Δ</span>
+            <strong class="${deltaClass(ex.confidence_delta)}">${ex.confidence_delta >= 0 ? "+" : ""}${fmt(ex.confidence_delta)}</strong>
+          </div>
+        </button>
+      `).join("");
+
+      list.querySelectorAll(".list-item").forEach(button => {
+        button.addEventListener("click", () => {
+          selectedIndex = Number(button.dataset.index);
+          render();
+        });
+      });
+    }
+
+    function renderDetail() {
+      const detail = document.getElementById("detail");
+      const ex = filtered[selectedIndex];
+      if (!ex) {
+        detail.innerHTML = `<div class="summary">No matching examples.</div>`;
+        return;
+      }
+
+      const patch = ex.patch_meta;
+      const target = ex.gt_key || ex.correct_answer || "n/a";
+      detail.innerHTML = `
+        <div class="summary">
+          <h2>${esc(ex.question)}</h2>
+          <div class="facts">
+            <div class="fact"><div class="label">Dataset</div><div class="value">${esc(ex.dataset_label)}</div></div>
+            <div class="fact"><div class="label">Sample</div><div class="value">${esc(ex.sample_id)}</div></div>
+            <div class="fact"><div class="label">Target</div><div class="value">${esc(target)}</div></div>
+            <div class="fact"><div class="label">Layer</div><div class="value">${ex.layer}</div></div>
+            <div class="fact"><div class="label">Token position</div><div class="value">${ex.token_position}</div></div>
+            <div class="fact"><div class="label">Visual-token offset</div><div class="value">${ex.visual_rel_pos} / ${ex.visual_token_count_estimate}</div></div>
+            <div class="fact"><div class="label">Approx grid cell</div><div class="value">row ${patch.grid_row + 1}, col ${patch.grid_col + 1}</div></div>
+            <div class="fact"><div class="label">Answer changed</div><div class="value">${ex.answer_changed ? "yes" : "no"}</div></div>
+            <div class="fact"><div class="label">Score gain</div><div class="value ${deltaClass(ex.score_delta)}">${ex.score_delta >= 0 ? "+" : ""}${fmt(ex.score_delta)}</div></div>
+            <div class="fact"><div class="label">Confidence gain</div><div class="value ${deltaClass(ex.confidence_delta)}">${ex.confidence_delta >= 0 ? "+" : ""}${fmt(ex.confidence_delta)}</div></div>
+          </div>
+        </div>
+
+        <div class="images">
+          <figure>
+            <figcaption>Original clean image</figcaption>
+            <img src="${esc(ex.clean_image)}" alt="Original clean image">
+          </figure>
+          <figure>
+            <figcaption>Blurred / degraded image</figcaption>
+            <img src="${esc(ex.blurred_image)}" alt="Blurred degraded image">
+          </figure>
+          <figure>
+            <figcaption>Blurred image + clean visual-token region</figcaption>
+            <img src="${esc(ex.restored_image)}" alt="Blurred image with clean visual-token region restored">
+          </figure>
+        </div>
+
+        <table class="answers">
+          <thead>
+            <tr><th>Run</th><th>Answer</th><th>Score</th><th>Answer confidence</th></tr>
+          </thead>
+          <tbody>
+            ${answerCell("Clean", ex.clean_answer, ex.clean_score, ex.clean_confidence)}
+            ${answerCell("Degraded", ex.degraded_answer, ex.degraded_score, ex.degraded_confidence)}
+            ${answerCell("Patched visual token", ex.patched_answer, ex.patched_score, ex.patched_confidence, ex.degraded_score, ex.degraded_confidence)}
+          </tbody>
+        </table>
+
+        <div class="note">
+          ${esc(payload.notes.join(" "))}
+        </div>
+      `;
+    }
+
+    function render() {
+      renderDatasetTabs();
+      renderList();
+      renderDetail();
+      document.getElementById("subtitle").textContent = `${filtered.length} of ${examples.length} examples shown`;
+      document.getElementById("runMeta").textContent = `Layer ${payload.layer} · ${payload.severity} blur`;
+    }
+
+    function applyFilters() {
+      const q = document.getElementById("search").value.trim().toLowerCase();
+      const change = document.getElementById("changeFilter").value;
+      const sortBy = document.getElementById("sortBy").value;
+
+      filtered = examples.filter(ex => {
+        const datasetOk = activeDataset === "all" || ex.dataset === activeDataset;
+        const changeOk = !change || (change === "changed" ? ex.answer_changed : !ex.answer_changed);
+        const haystack = [
+          ex.dataset_label, ex.sample_id, ex.question, ex.correct_answer, ex.gt_key,
+          ex.clean_answer, ex.degraded_answer, ex.patched_answer
+        ].join(" ").toLowerCase();
+        return datasetOk && changeOk && (!q || haystack.includes(q));
+      });
+
+      const key = sortBy === "confidence"
+        ? "confidence_delta"
+        : sortBy === "recovery"
+          ? "confidence_recovery"
+          : "score_delta";
+      filtered.sort((a, b) => Number(b[key] ?? -999) - Number(a[key] ?? -999));
+      selectedIndex = Math.min(selectedIndex, Math.max(filtered.length - 1, 0));
+      render();
+    }
+
+    fetch("samples.json")
+      .then(response => response.json())
+      .then(data => {
+        payload = data;
+        examples = data.examples;
+        filtered = [...examples];
+        document.getElementById("search").addEventListener("input", () => { selectedIndex = 0; applyFilters(); });
+        document.getElementById("changeFilter").addEventListener("input", () => { selectedIndex = 0; applyFilters(); });
+        document.getElementById("sortBy").addEventListener("input", () => { selectedIndex = 0; applyFilters(); });
+        document.getElementById("clearFilters").addEventListener("click", () => {
+          activeDataset = "all";
+          selectedIndex = 0;
+          document.getElementById("search").value = "";
+          document.getElementById("changeFilter").value = "";
+          document.getElementById("sortBy").value = "score";
+          applyFilters();
+        });
+        applyFilters();
+      })
+      .catch(error => {
+        document.getElementById("detail").innerHTML = `<div class="summary">Could not load samples.json: ${esc(error.message)}</div>`;
+      });
+  </script>
+</body>
+</html>

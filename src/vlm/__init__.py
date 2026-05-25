@@ -6,9 +6,14 @@ from .adapters import (
     extract_vision_hidden_states,
     get_vlm_adapter,
     infer_image_token_ids,
+    append_qwen_empty_thinking_preamble,
     load_model,
     prepare_inputs,
+    prepare_qwen_fused_inputs_embeds,
     prepare_qwen_visual_only_inputs_batch,
+    qwen_vision_cache_context,
+    qwen_patching_max_new_tokens,
+    strip_qwen_thinking_prefix,
 )
 
 __all__ = [
@@ -19,7 +24,12 @@ __all__ = [
     "extract_vision_hidden_states",
     "get_vlm_adapter",
     "infer_image_token_ids",
+    "append_qwen_empty_thinking_preamble",
     "load_model",
     "prepare_inputs",
+    "prepare_qwen_fused_inputs_embeds",
     "prepare_qwen_visual_only_inputs_batch",
+    "qwen_vision_cache_context",
+    "qwen_patching_max_new_tokens",
+    "strip_qwen_thinking_prefix",
 ]

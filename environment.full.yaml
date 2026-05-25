@@ -1,0 +1,24 @@
+name: llava-experiments
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - numpy>=1.26
+  - pandas>=2.2
+  - matplotlib>=3.8
+  - tqdm>=4.66
+  - pillow>=10.4
+  - aiohttp>=3.10
+  - scikit-learn>=1.5
+  - pyarrow>=17.0
+  - pip:
+      - transformers>=4.42.0
+      - accelerate>=0.31.0
+      - torch>=2.3.0
+      - torchvision>=0.18.0
+      - sentencepiece>=0.2.0
+      - datasets==3.6.0
+      - huggingface_hub>=0.24.0
+      - hf-transfer>=0.1.6
+      - hf_xet

@@ -14,6 +14,7 @@ class SupervisionGenConfig:
 
     seed_offset: int = 42
     max_samples: Optional[int] = None
+    run_name: Optional[str] = None
     verbose: bool = False
 
     # Feature switches
@@ -55,10 +56,15 @@ class SupervisionGenConfig:
     use_lm_question_including_final_lasttoken: bool = True
 
     # Layer-sweep options for dedicated experiments
+    use_vision_all_layers_mean: bool = False
     use_lm_visual_all_layers_mean: bool = False
+    use_lm_visual_all_layers_lasttoken: bool = False
     use_lm_question_all_layers_mean: bool = False
+    use_lm_question_all_layers_lasttoken: bool = False
     use_lm_answer_all_layers_mean: bool = False
+    use_lm_answer_all_layers_lasttoken: bool = False
     use_lm_fullspan_all_layers_lasttoken: bool = False
+    use_answer_geom_mean_probability: bool = False
 
     # Layers
     force_middle_layer: Optional[int] = None

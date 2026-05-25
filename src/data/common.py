@@ -94,3 +94,64 @@ def prepare_coco_qa_vi_split(
             }
         )
     return samples
+
+
+def prepare_pope_split(
+    split_obj,
+    seed_offset: int,
+    max_samples: Optional[int],
+) -> List[Dict]:
+    """
+    Prepare POPE into the shared sample schema used by the VQA-style pipelines.
+
+    The HF dataset schema has varied a bit across snapshots, so we resolve a few
+    likely field names defensively.
+    """
+    if max_samples is not None:
+        split_obj = split_obj.shuffle(seed=42 + seed_offset)
+        split_obj = split_obj.select(range(min(max_samples, len(split_obj))))
+
+    samples: List[Dict] = []
+    for idx, row in enumerate(tqdm(split_obj)):
+        question = (
+            row.get("question")
+            or row.get("text")
+            or row.get("query")
+            or ""
+        )
+
+        gt_answer = (
+            row.get("answer")
+            or row.get("label")
+            or row.get("gt_answer")
+            or ""
+        )
+        if gt_answer is None:
+            gt_answer = ""
+        gt_answer = str(gt_answer).strip().lower()
+
+        prompt = f"Question: {question}\nAnswer with exactly one word: yes or no."
+
+        sample_id = (
+            row.get("sample_id")
+            or row.get("id")
+            or row.get("question_id")
+            or row.get("image_id")
+        )
+
+        samples.append(
+            {
+                "idx": idx,
+                "image": row.get("image"),
+                "question": question,
+                "prompt": prompt,
+                "gt_answer": gt_answer,
+                "question_id": row.get("question_id"),
+                "image_id": row.get("image_id"),
+                "sample_id": sample_id,
+                "category": row.get("category"),
+                "statement": row.get("statement") or question,
+                "dataset_id": "pope",
+            }
+        )
+    return samples

@@ -1,0 +1,25 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --job-name=llava_debug_tokens
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=00:30:00
+#SBATCH --output=slurm_outputs/patching/llava/vqa-v2/debug_sample_generation_tokens_%A.out
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+cd "$HOME/vlm_uncertainty/" || exit 1
+
+source activate llava-experiments
+
+mkdir -p slurm_outputs/patching/llava/vqa-v2
+
+python -u scripts/patching/llava/debug_sample_generation_tokens.py \
+  --sample_id "${SAMPLE_ID:-493612002}" \
+  --dataset_id "${DATASET_ID:-vqa-v2}" \
+  --severity "${SEVERITY:-extreme}" \
+  --device "${DEVICE:-cuda}"

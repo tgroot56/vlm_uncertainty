@@ -54,6 +54,7 @@ def run_generate_dataset(args):
         dataset_split=args.dataset_split,
         seed_offset=seed,
         max_samples=args.max_samples,  
+        run_name=getattr(args, "run_name", None),
         verbose=verbose,
     )
 
@@ -74,7 +75,7 @@ def run_generate_dataset(args):
         cfg.use_lm_question_final_lasttoken = False
         cfg.use_lm_answer_middle_lasttoken = False
         cfg.use_lm_answer_final_lasttoken = False
-        cfg.use_answer_prob_entropy_stats = False
+        cfg.use_answer_prob_entropy_stats = "answer_prob_entropy_stats" in all_lm_mean_layers
         cfg.use_lm_fullspan_middle = False
         cfg.use_lm_fullspan_final = False
         cfg.use_lm_fullspan_middle_lasttoken = False
@@ -84,10 +85,15 @@ def run_generate_dataset(args):
         cfg.use_lm_question_including_middle_lasttoken = False
         cfg.use_lm_question_including_final_lasttoken = False
 
+        cfg.use_vision_all_layers_mean = "vision" in all_lm_mean_layers
         cfg.use_lm_visual_all_layers_mean = "visual" in all_lm_mean_layers
+        cfg.use_lm_visual_all_layers_lasttoken = "visual_lasttok" in all_lm_mean_layers
         cfg.use_lm_question_all_layers_mean = "question" in all_lm_mean_layers
+        cfg.use_lm_question_all_layers_lasttoken = "question_lasttok" in all_lm_mean_layers
         cfg.use_lm_answer_all_layers_mean = "answer" in all_lm_mean_layers
+        cfg.use_lm_answer_all_layers_lasttoken = "answer_lasttok" in all_lm_mean_layers
         cfg.use_lm_fullspan_all_layers_lasttoken = "fullspan_lasttok" in all_lm_mean_layers
+        cfg.use_answer_geom_mean_probability = "answer_geom_mean_probability" in all_lm_mean_layers
 
     if task.prediction_mode == "multiple_choice":
         predict_fn = predict_letter_and_logits_with_features

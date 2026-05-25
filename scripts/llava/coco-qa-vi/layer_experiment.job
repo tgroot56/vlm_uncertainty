@@ -1,0 +1,162 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --job-name=llava_coco_qa_vi_layers
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=36:00:00
+#SBATCH --mem=128G
+#SBATCH --output=slurm_outputs/llava/coco_qa_vi_layer_experiment_%A.out
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+cd "$HOME/vlm_uncertainty/" || exit 1
+
+source activate llava-experiments
+
+export VLM_UQ_STORAGE_ROOT="${VLM_UQ_STORAGE_ROOT:-/projects/prjs2014}"
+export VLM_UQ_USER_STORAGE_ROOT="${VLM_UQ_USER_STORAGE_ROOT:-$VLM_UQ_STORAGE_ROOT/$USER}"
+
+export HF_HOME="${HF_HOME:-$VLM_UQ_USER_STORAGE_ROOT/hf_home}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_datasets}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_transformers}"
+
+mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$TRANSFORMERS_CACHE"
+
+export VLM_UQ_PREP_CACHE="${VLM_UQ_PREP_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/vlm_uq_prepared_cache}"
+mkdir -p "$VLM_UQ_PREP_CACHE"
+mkdir -p slurm_outputs/llava
+
+LAYER_EXPERIMENT_ROOT="${LAYER_EXPERIMENT_ROOT:-/projects/prjs2014/llava/layer_experiment}"
+VLM_ID="${VLM_ID:-llava-hf/llava-1.5-7b-hf}"
+DEVICE="${DEVICE:-cuda}"
+SEED="${SEED:-42}"
+MAX_SAMPLES="${MAX_SAMPLES:-}"
+
+MODEL_TYPE="${MODEL_TYPE:-mlp}"
+NUM_EPOCHS="${NUM_EPOCHS:-20}"
+BATCH_SIZE="${BATCH_SIZE:-32}"
+TRAIN_OUTPUT_DIR="${TRAIN_OUTPUT_DIR:-$LAYER_EXPERIMENT_ROOT/probe_results/coco-qa-vi/${MODEL_TYPE}_layer_comparison}"
+LAYER_FEATURE_FAMILIES="${LAYER_FEATURE_FAMILIES:-vision visual visual_lasttok question_lasttok answer_lasttok fullspan_lasttok answer_geom_mean_probability}"
+
+mkdir -p "$LAYER_EXPERIMENT_ROOT" "$TRAIN_OUTPUT_DIR"
+
+GENERATE_ARGS=(
+  python -u -m src.cli.generate
+  --vlm "$VLM_ID"
+  --dataset coco-qa-vi
+  --output_dir "$LAYER_EXPERIMENT_ROOT"
+  --seed "$SEED"
+  --device "$DEVICE"
+  --all_lm_mean_layers
+  # --verbose
+)
+
+# shellcheck disable=SC2206
+LAYER_FEATURE_FAMILY_ARRAY=($LAYER_FEATURE_FAMILIES)
+GENERATE_ARGS+=("${LAYER_FEATURE_FAMILY_ARRAY[@]}")
+
+if [[ -n "$MAX_SAMPLES" ]]; then
+  GENERATE_ARGS+=(--max_samples "$MAX_SAMPLES")
+fi
+
+echo "============================================================"
+echo "Generating layer-sweep UQ dataset"
+echo "============================================================"
+echo "Output root: $LAYER_EXPERIMENT_ROOT"
+echo "Model: $VLM_ID"
+echo "Dataset: coco-qa-vi"
+
+GENERATION_MARKER="$(mktemp)"
+touch "$GENERATION_MARKER"
+
+srun "${GENERATE_ARGS[@]}"
+
+DATA_SEARCH_ROOT="$LAYER_EXPERIMENT_ROOT/coco-qa-vi/$VLM_ID"
+
+if [[ -z "${DATA_PATH:-}" ]]; then
+  DATA_PATH="$(find "$DATA_SEARCH_ROOT" -path '*/supervision_dataset.pt' -newer "$GENERATION_MARKER" -print | sort | tail -n 1)"
+
+  if [[ -z "$DATA_PATH" ]]; then
+    echo "Warning: no freshly updated supervision dataset found after generation; falling back to most recently modified dataset under $DATA_SEARCH_ROOT"
+    DATA_PATH="$(find "$DATA_SEARCH_ROOT" -path '*/supervision_dataset.pt' -printf '%T@ %p\n' | sort -n | tail -n 1 | cut -d' ' -f2-)"
+  fi
+fi
+
+rm -f "$GENERATION_MARKER"
+
+if [[ -z "$DATA_PATH" ]]; then
+  echo "Could not find supervision dataset under: $DATA_SEARCH_ROOT" >&2
+  exit 1
+fi
+
+echo "Using DATA_PATH=$DATA_PATH"
+
+mapfile -t FEATURE_LIST < <(
+  python - <<'PY' "$DATA_PATH"
+import re
+import sys
+import torch
+
+payload = torch.load(sys.argv[1], map_location="cpu", weights_only=False)
+feature_names = payload.get("feature_names", [])
+layer_prefix_order = {
+    "vision_mean_layer_": 0,
+    "lm_visual_mean_layer_": 1,
+    "lm_visual_lasttok_layer_": 2,
+    "lm_question_lasttok_layer_": 3,
+    "lm_answer_lasttok_layer_": 4,
+    "lm_fullspan_lasttok_layer_": 5,
+}
+scalar_order = {
+    "answer_gen_geom_mean_probability": 6,
+}
+
+def sort_key(name: str):
+    if name in scalar_order:
+        return (scalar_order[name], 10**9, name)
+    for prefix, prefix_rank in layer_prefix_order.items():
+        if name.startswith(prefix):
+            suffix = name[len(prefix):]
+            match = re.fullmatch(r"-?\d+", suffix)
+            layer_idx = int(suffix) if match else 10**9
+            return (prefix_rank, layer_idx, name)
+    return (len(layer_prefix_order) + len(scalar_order), 10**9, name)
+
+selected = [
+    name for name in feature_names
+    if name in scalar_order or any(name.startswith(prefix) for prefix in layer_prefix_order)
+]
+
+for name in sorted(selected, key=sort_key):
+    print(name)
+PY
+)
+
+if [[ "${#FEATURE_LIST[@]}" -eq 0 ]]; then
+  echo "No layer-experiment features were found in: $DATA_PATH" >&2
+  exit 1
+fi
+
+echo "============================================================"
+echo "Training probes for ${#FEATURE_LIST[@]} layer features"
+echo "============================================================"
+
+for FEATURE in "${FEATURE_LIST[@]}"; do
+  echo "------------------------------------------------------------"
+  echo "Training probe for feature: $FEATURE"
+  echo "------------------------------------------------------------"
+
+  srun python -m src.cli.train \
+    --data_path "$DATA_PATH" \
+    --features "$FEATURE" \
+    --model_type "$MODEL_TYPE" \
+    --num_epochs "$NUM_EPOCHS" \
+    --batch_size "$BATCH_SIZE" \
+    --output_dir "$TRAIN_OUTPUT_DIR" \
+    --seed "$SEED" \
+    --no_class_weights
+done

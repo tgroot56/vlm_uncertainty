@@ -1,0 +1,280 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --job-name=qwen_coco_qa_vi_layers
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=12:00:00
+#SBATCH --mem=128G
+#SBATCH --output=slurm_outputs/qwen/coco_qa_vi_layer_experiment_%A.out
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+cd "$HOME/vlm_uncertainty/" || exit 1
+
+source activate llava-experiments
+
+export VLM_UQ_STORAGE_ROOT="${VLM_UQ_STORAGE_ROOT:-/projects/prjs2014}"
+export VLM_UQ_USER_STORAGE_ROOT="${VLM_UQ_USER_STORAGE_ROOT:-$VLM_UQ_STORAGE_ROOT/$USER}"
+
+export HF_HOME="${HF_HOME:-$VLM_UQ_USER_STORAGE_ROOT/hf_home}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_datasets}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_transformers}"
+
+mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$TRANSFORMERS_CACHE"
+
+export VLM_UQ_PREP_CACHE="${VLM_UQ_PREP_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/vlm_uq_prepared_cache}"
+mkdir -p "$VLM_UQ_PREP_CACHE"
+mkdir -p slurm_outputs/qwen
+
+DATASET_ID="${DATASET_ID:-coco-qa-vi}"
+DATASET_SPLIT="${DATASET_SPLIT:-}"
+DATASET_LABEL="${DATASET_LABEL:-COCO-QA-VI}"
+OUTPUT_STEM="${OUTPUT_STEM:-qwen_coco_qa_vi_mlp_layer_brier}"
+LAYER_EXPERIMENT_ROOT="${LAYER_EXPERIMENT_ROOT:-/projects/prjs2014/qwen/layer_experiment}"
+VLM_ID="${VLM_ID:-Qwen/Qwen3.5-9B}"
+DEVICE="${DEVICE:-cuda}"
+SEED="${SEED:-42}"
+MAX_SAMPLES="${MAX_SAMPLES:-}"
+RUN_SUFFIX="${RUN_SUFFIX:-}"
+RUN_NAME="${RUN_NAME:-qwen_layer_sweep_seed${SEED}}"
+SKIP_EXISTING_PROBES="${SKIP_EXISTING_PROBES:-1}"
+
+if [[ -n "$DATASET_SPLIT" ]]; then
+  DATASET_OUTPUT_ID="$DATASET_ID/$DATASET_SPLIT"
+else
+  DATASET_OUTPUT_ID="$DATASET_ID"
+fi
+
+if [[ -z "${MIN_LABEL_MEAN:-}" || -z "${MAX_LABEL_MEAN:-}" ]]; then
+  case "$DATASET_OUTPUT_ID" in
+    vqa-v2)
+      EXPECTED_LABEL_MEAN="~0.83"
+      DEFAULT_MIN_LABEL_MEAN="0.70"
+      DEFAULT_MAX_LABEL_MEAN="0.95"
+      ;;
+    coco-qa-vi)
+      EXPECTED_LABEL_MEAN="~0.63"
+      DEFAULT_MIN_LABEL_MEAN="0.45"
+      DEFAULT_MAX_LABEL_MEAN="0.80"
+      ;;
+    imagenet-r)
+      EXPECTED_LABEL_MEAN="~0.95"
+      DEFAULT_MIN_LABEL_MEAN="0.85"
+      DEFAULT_MAX_LABEL_MEAN="0.99"
+      ;;
+    pope/random)
+      EXPECTED_LABEL_MEAN="~0.92"
+      DEFAULT_MIN_LABEL_MEAN="0.80"
+      DEFAULT_MAX_LABEL_MEAN="0.98"
+      ;;
+    *)
+      EXPECTED_LABEL_MEAN="unknown"
+      DEFAULT_MIN_LABEL_MEAN="0.01"
+      DEFAULT_MAX_LABEL_MEAN="0.99"
+      ;;
+  esac
+fi
+MIN_LABEL_MEAN="${MIN_LABEL_MEAN:-$DEFAULT_MIN_LABEL_MEAN}"
+MAX_LABEL_MEAN="${MAX_LABEL_MEAN:-$DEFAULT_MAX_LABEL_MEAN}"
+
+if [[ -z "$RUN_SUFFIX" && -n "$MAX_SAMPLES" ]]; then
+  if (( MAX_SAMPLES % 1000 == 0 )); then
+    RUN_SUFFIX="_$((MAX_SAMPLES / 1000))k"
+  else
+    RUN_SUFFIX="_${MAX_SAMPLES}"
+  fi
+fi
+
+MODEL_TYPE="${MODEL_TYPE:-mlp}"
+NUM_EPOCHS="${NUM_EPOCHS:-20}"
+BATCH_SIZE="${BATCH_SIZE:-32}"
+TRAIN_OUTPUT_DIR="${TRAIN_OUTPUT_DIR:-$LAYER_EXPERIMENT_ROOT/probe_results/$DATASET_OUTPUT_ID/${MODEL_TYPE}_layer_comparison${RUN_SUFFIX}}"
+DEFAULT_LAYER_FEATURE_FAMILIES="vision visual visual_lasttok question_lasttok answer_lasttok fullspan_lasttok answer_prob_entropy_stats"
+LAYER_FEATURE_FAMILIES="${LAYER_FEATURE_FAMILIES:-$DEFAULT_LAYER_FEATURE_FAMILIES}"
+if [[ -z "${LAYER_FEATURE_FAMILIES//[[:space:]]/}" ]]; then
+  LAYER_FEATURE_FAMILIES="$DEFAULT_LAYER_FEATURE_FAMILIES"
+fi
+PLOT_AFTER_TRAIN="${PLOT_AFTER_TRAIN:-1}"
+PLOT_OUTPUT_PDF="${PLOT_OUTPUT_PDF:-probe_results/layer_experiment/${OUTPUT_STEM}${RUN_SUFFIX}.pdf}"
+
+mkdir -p "$LAYER_EXPERIMENT_ROOT" "$TRAIN_OUTPUT_DIR"
+
+GENERATE_ARGS=(
+  python -u -m src.cli.generate
+  --vlm "$VLM_ID"
+  --dataset "$DATASET_ID"
+  --output_dir "$LAYER_EXPERIMENT_ROOT"
+  --seed "$SEED"
+  --device "$DEVICE"
+  --run_name "$RUN_NAME"
+)
+
+if [[ -n "$DATASET_SPLIT" ]]; then
+  GENERATE_ARGS+=(--dataset_split "$DATASET_SPLIT")
+fi
+
+if [[ "$DATASET_OUTPUT_ID" == "imagenet-r" ]]; then
+  K_OPTIONS="${K_OPTIONS:-16}"
+  CLIP_MODE="${CLIP_MODE:-gt_to_text}"
+  CLIP_TOP_POOL="${CLIP_TOP_POOL:-30}"
+  GENERATE_ARGS+=(
+    --k_options "$K_OPTIONS"
+    --clip_negatives
+    --clip_mode "$CLIP_MODE"
+    --clip_top_pool "$CLIP_TOP_POOL"
+  )
+fi
+
+# shellcheck disable=SC2206
+LAYER_FEATURE_FAMILY_ARRAY=($LAYER_FEATURE_FAMILIES)
+GENERATE_ARGS+=(--all_lm_mean_layers "${LAYER_FEATURE_FAMILY_ARRAY[@]}")
+
+if [[ -n "$MAX_SAMPLES" ]]; then
+  GENERATE_ARGS+=(--max_samples "$MAX_SAMPLES")
+fi
+
+echo "============================================================"
+echo "Generating Qwen layer-sweep UQ dataset"
+echo "============================================================"
+echo "Output root: $LAYER_EXPERIMENT_ROOT"
+echo "Model: $VLM_ID"
+echo "Dataset: $DATASET_ID"
+echo "Run name: $RUN_NAME"
+echo "Max samples: ${MAX_SAMPLES:-full dataset}"
+echo "Layer feature families: $LAYER_FEATURE_FAMILIES"
+echo "Expected label mean: $EXPECTED_LABEL_MEAN ($MIN_LABEL_MEAN-$MAX_LABEL_MEAN)"
+echo "Train output: $TRAIN_OUTPUT_DIR"
+
+GENERATION_MARKER="$(mktemp)"
+touch "$GENERATION_MARKER"
+
+srun "${GENERATE_ARGS[@]}"
+
+if [[ -n "$DATASET_SPLIT" ]]; then
+  DATA_SEARCH_ROOT="$LAYER_EXPERIMENT_ROOT/$DATASET_ID/$DATASET_SPLIT/$VLM_ID"
+else
+  DATA_SEARCH_ROOT="$LAYER_EXPERIMENT_ROOT/$DATASET_ID/$VLM_ID"
+fi
+
+if [[ -z "${DATA_PATH:-}" ]]; then
+  DATA_PATH="$(find "$DATA_SEARCH_ROOT" -path '*/supervision_dataset.pt' -newer "$GENERATION_MARKER" -print | sort | tail -n 1)"
+
+  if [[ -z "$DATA_PATH" ]]; then
+    echo "Warning: no freshly updated supervision dataset found after generation; falling back to most recently modified dataset under $DATA_SEARCH_ROOT"
+    DATA_PATH="$(find "$DATA_SEARCH_ROOT" -path '*/supervision_dataset.pt' -printf '%T@ %p\n' | sort -n | tail -n 1 | cut -d' ' -f2-)"
+  fi
+fi
+
+rm -f "$GENERATION_MARKER"
+
+if [[ -z "$DATA_PATH" ]]; then
+  echo "Could not find supervision dataset under: $DATA_SEARCH_ROOT" >&2
+  exit 1
+fi
+
+echo "Using DATA_PATH=$DATA_PATH"
+
+python - <<'PY' "$DATA_PATH" "$MIN_LABEL_MEAN" "$MAX_LABEL_MEAN"
+import sys
+import torch
+
+data_path = sys.argv[1]
+min_label_mean = float(sys.argv[2])
+max_label_mean = float(sys.argv[3])
+payload = torch.load(data_path, map_location="cpu", weights_only=False)
+y = payload["y"].float()
+label_mean = float(y.mean().item())
+unique = torch.unique(y)
+print(f"Dataset label sanity: N={len(y)} label_mean={label_mean:.6f} unique_values={unique[:10].tolist()}")
+if len(unique) < 2 or not (min_label_mean <= label_mean <= max_label_mean):
+    raise SystemExit(
+        "Refusing to train probes: generated dataset appears label-degenerate. "
+        f"Expected label_mean in [{min_label_mean}, {max_label_mean}], got {label_mean:.6f}."
+    )
+PY
+
+mapfile -t FEATURE_LIST < <(
+  python - <<'PY' "$DATA_PATH"
+import re
+import sys
+import torch
+
+payload = torch.load(sys.argv[1], map_location="cpu", weights_only=False)
+feature_names = payload.get("feature_names", [])
+layer_prefix_order = {
+    "vision_mean_layer_": 0,
+    "lm_visual_mean_layer_": 1,
+    "lm_visual_lasttok_layer_": 2,
+    "lm_question_lasttok_layer_": 3,
+    "lm_answer_lasttok_layer_": 4,
+    "lm_fullspan_lasttok_layer_": 5,
+}
+scalar_order = {
+    "answer_gen_neglogp_mean": 6,
+    "answer_gen_entropy_mean": 7,
+}
+
+def sort_key(name: str):
+    if name in scalar_order:
+        return (scalar_order[name], 10**9, name)
+    for prefix, prefix_rank in layer_prefix_order.items():
+        if name.startswith(prefix):
+            suffix = name[len(prefix):]
+            match = re.fullmatch(r"-?\d+", suffix)
+            layer_idx = int(suffix) if match else 10**9
+            return (prefix_rank, layer_idx, name)
+    return (len(layer_prefix_order) + len(scalar_order), 10**9, name)
+
+selected = [
+    name for name in feature_names
+    if name in scalar_order or any(name.startswith(prefix) for prefix in layer_prefix_order)
+]
+
+for name in sorted(selected, key=sort_key):
+    print(name)
+PY
+)
+
+if [[ "${#FEATURE_LIST[@]}" -eq 0 ]]; then
+  echo "No layer-experiment features were found in: $DATA_PATH" >&2
+  exit 1
+fi
+
+echo "============================================================"
+echo "Training probes for ${#FEATURE_LIST[@]} Qwen layer features"
+echo "============================================================"
+
+for FEATURE in "${FEATURE_LIST[@]}"; do
+  echo "------------------------------------------------------------"
+  echo "Training probe for feature: $FEATURE"
+  echo "------------------------------------------------------------"
+
+  FEATURE_OUTPUT_DIR="$TRAIN_OUTPUT_DIR/$MODEL_TYPE/$FEATURE"
+  if [[ "$SKIP_EXISTING_PROBES" == "1" && -s "$FEATURE_OUTPUT_DIR/metrics_test.json" ]]; then
+    echo "Skipping existing completed probe: $FEATURE_OUTPUT_DIR"
+    continue
+  fi
+
+  srun python -m src.cli.train \
+    --data_path "$DATA_PATH" \
+    --features "$FEATURE" \
+    --model_type "$MODEL_TYPE" \
+    --num_epochs "$NUM_EPOCHS" \
+    --batch_size "$BATCH_SIZE" \
+    --output_dir "$TRAIN_OUTPUT_DIR" \
+    --seed "$SEED" \
+    --no_class_weights
+done
+
+if [[ "$PLOT_AFTER_TRAIN" == "1" ]]; then
+  python -m utils.tables_and_plots.plot_layer_experiment_brier \
+    --model qwen \
+    --dataset "$DATASET_OUTPUT_ID" \
+    --results-root "$TRAIN_OUTPUT_DIR/$MODEL_TYPE" \
+    --output-pdf "$PLOT_OUTPUT_PDF" \
+    --title "Qwen $DATASET_LABEL: uncertainty signal across LM layers"
+fi

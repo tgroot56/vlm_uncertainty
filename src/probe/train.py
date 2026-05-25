@@ -319,6 +319,7 @@ def train_probe(
     print_test_predictions: bool = True,
     use_class_weights: bool = False,
     shuffle_train_labels: bool = False,
+    binarize_one_score_labels: bool = False,
     num_components: int = 4,
 ):
     """
@@ -340,6 +341,7 @@ def train_probe(
         print_test_predictions: Whether to print test set predictions
         use_class_weights: Whether to use class weighting for imbalanced data
         shuffle_train_labels: Whether to shuffle training data for baseline
+        binarize_one_score_labels: Whether to map labels to 1 only when y == 1.0, else 0
         num_components: Number of components for ComponentAttentionMLPProbe (if used)   
     """
     print(f"\nStarting training of probe model...")
@@ -370,6 +372,10 @@ def train_probe(
         normalize=normalize,
         seed=seed,
     )
+
+    if binarize_one_score_labels:
+        print("\n[LABEL TRANSFORM] Binarizing labels: y = 1 only for original y == 1.0, else 0")
+        dataset.y = (dataset.y == 1.0).float()
 
     if shuffle_train_labels:
         print("\n[CONTROL] Shuffling TRAIN labels (features unchanged)")
@@ -617,6 +623,8 @@ def train_probe(
         "val_split": val_split,
         "normalize": normalize,
         "seed": seed,
+        "binarize_one_score_labels": binarize_one_score_labels,
+        "shuffle_train_labels": shuffle_train_labels,
         "best_epoch": best_epoch + 1,
         "best_val_loss": best_val_loss,
         "test_loss": test_metrics["loss"],
@@ -631,4 +639,3 @@ def train_probe(
     return model, history
 
     
-

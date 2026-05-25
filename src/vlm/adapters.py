@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import inspect
+import re
 from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
 
 import torch
@@ -59,6 +60,37 @@ QWEN_ADAPTER = VLMAdapter(
 )
 
 
+_QWEN_THINK_START_ID = 248068
+_QWEN_THINK_END_ID = 248069
+_QWEN_NEWLINE_ID = 271
+_QWEN_EMPTY_THINKING_PREAMBLE_IDS = (
+    _QWEN_THINK_START_ID,
+    _QWEN_NEWLINE_ID,
+    _QWEN_THINK_END_ID,
+    _QWEN_NEWLINE_ID,
+)
+
+
+GEMMA_ADAPTER = VLMAdapter(
+    family="gemma",
+    loader_kind="auto_image_text_to_text",
+    input_builder="chat_template_tokenized",
+    trust_remote_code=False,
+    assistant_markers=(
+        "<start_of_turn>model",
+        "model",
+        "Model:",
+    ),
+    image_token_text_markers=("image", "vision", "img"),
+    vision_attr_paths=(
+        ("model", "vision_tower", "vision_model"),
+        ("model", "vision_tower"),
+        ("vision_tower", "vision_model"),
+        ("vision_tower",),
+    ),
+)
+
+
 MOLMO_ADAPTER = VLMAdapter(
     family="molmo",
     loader_kind="auto_image_text_to_text",
@@ -87,6 +119,8 @@ def get_vlm_adapter(model_id: str) -> VLMAdapter:
         return LLAVA_ADAPTER
     if "qwen" in model_id_lower:
         return QWEN_ADAPTER
+    if "gemma" in model_id_lower:
+        return GEMMA_ADAPTER
     if "molmo" in model_id_lower:
         return MOLMO_ADAPTER
 
@@ -102,7 +136,14 @@ def load_model(
 ) -> Tuple[object, object, torch.device, VLMAdapter]:
     adapter = get_vlm_adapter(model_id)
     torch_device = _resolve_device(device)
-    dtype = torch.float16 if torch_device.type == "cuda" else torch.float32
+    if torch_device.type == "cuda":
+        # Gemma 3n's _init_weights fills `gradient_clipping` with a constant that
+        # overflows fp16 (RuntimeError: value cannot be converted to type at::Half
+        # without overflow). bf16 has matching range and is the checkpoint's
+        # native dtype.
+        dtype = torch.bfloat16 if adapter.family == "gemma" else torch.float16
+    else:
+        dtype = torch.float32
 
     print(f"Loading {adapter.family} model: {model_id}")
     print(f"Device: {torch_device}, dtype: {dtype}")
@@ -131,6 +172,7 @@ def prepare_inputs(
     image: Any,
     prompt: str,
     device: torch.device,
+    qwen_prefill_empty_thinking: bool = False,
 ) -> Dict[str, torch.Tensor]:
     if adapter.input_builder == "llava_text_and_images":
         messages = [{
@@ -163,6 +205,8 @@ def prepare_inputs(
             inputs = _move_batch_to_device(inputs, device)
             if adapter.family == "qwen":
                 inputs = _strip_qwen_trailing_thinking_tokens(inputs)
+                if qwen_prefill_empty_thinking:
+                    inputs = append_qwen_empty_thinking_preamble(inputs, device)
             return inputs
         except TypeError:
             inputs = processor.apply_chat_template(
@@ -175,6 +219,8 @@ def prepare_inputs(
             inputs = _move_batch_to_device(inputs, device)
             if adapter.family == "qwen":
                 inputs = _strip_qwen_trailing_thinking_tokens(inputs)
+                if qwen_prefill_empty_thinking:
+                    inputs = append_qwen_empty_thinking_preamble(inputs, device)
             return inputs
         except Exception:
             text_messages = [{
@@ -199,9 +245,99 @@ def prepare_inputs(
             if adapter.family == "qwen":
                 text_prompt = _strip_qwen_trailing_thinking_text(text_prompt)
             inputs = processor(text=[text_prompt], images=[image], return_tensors="pt")
-            return _move_batch_to_device(inputs, device)
+            inputs = _move_batch_to_device(inputs, device)
+            if adapter.family == "qwen" and qwen_prefill_empty_thinking:
+                inputs = append_qwen_empty_thinking_preamble(inputs, device)
+            return inputs
 
     raise ValueError(f"Unsupported input_builder '{adapter.input_builder}'")
+
+
+def prepare_qwen_fused_inputs_embeds(
+    model: Any,
+    adapter: "VLMAdapter",
+    processor: Any,
+    image: Any,
+    prompt: str,
+    device: torch.device,
+    qwen_prefill_empty_thinking: bool = False,
+) -> Dict[str, Any]:
+    """Pre-compute a Qwen vision-tower cache for reuse across patching calls.
+
+    Running the Qwen vision tower on every patching ``generate()`` call is the
+    dominant cost (measured ~20-40x per-call slowdown vs reusing a cached
+    vision output). This helper runs ``get_image_features`` once; the result
+    lives in the returned bundle and can be reused by every subsequent
+    patching condition on the same (image, prompt) pair.
+
+    The bundle contains the original ``inputs`` (input_ids, pixel_values,
+    image_grid_thw, attention_mask, ...) plus the pre-computed vision output
+    in ``cached_image_features``. Downstream calls (see
+    ``_patched_generate`` in ``src.patching.run_patching``) temporarily
+    monkey-patch ``model.model.get_image_features`` to return this cached
+    value, which lets the standard ``input_ids`` path run end-to-end (so
+    M-RoPE 3D position_ids are computed correctly) while skipping only the
+    expensive vision-encoder forward.
+
+    Only supported for ``adapter.family == "qwen"``.
+    """
+    if adapter.family != "qwen":
+        raise ValueError(
+            f"prepare_qwen_fused_inputs_embeds only supports Qwen; got '{adapter.family}'."
+        )
+
+    inputs = prepare_inputs(
+        adapter,
+        processor,
+        image,
+        prompt,
+        device,
+        qwen_prefill_empty_thinking=qwen_prefill_empty_thinking,
+    )
+    pixel_values = inputs.get("pixel_values")
+    image_grid_thw = inputs.get("image_grid_thw")
+
+    # The multimodal wrapper (Qwen3_5ForConditionalGeneration) exposes
+    # ``model`` (the inner multimodal module) which owns ``get_image_features``.
+    mm_model = getattr(model, "model", model)
+
+    cached_image_features = None
+    if pixel_values is not None and image_grid_thw is not None:
+        with torch.inference_mode():
+            cached_image_features = mm_model.get_image_features(
+                pixel_values, image_grid_thw, return_dict=True,
+            )
+
+    return {
+        "inputs": inputs,
+        "cached_image_features": cached_image_features,
+        "prompt_len": int(inputs["input_ids"].shape[1]),
+    }
+
+
+def qwen_vision_cache_context(model: Any, fused_bundle: Dict[str, Any]):
+    """Context manager that redirects ``model.model.get_image_features`` to
+    the pre-computed value in ``fused_bundle``. Restores the original method
+    on exit. Use around ``model.generate(**fused_bundle["inputs"], ...)`` to
+    skip the vision tower while keeping the original input_ids path
+    (preserves M-RoPE position_ids)."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _cm():
+        mm_model = getattr(model, "model", model)
+        cached = fused_bundle.get("cached_image_features")
+        if cached is None:
+            yield
+            return
+        original = mm_model.get_image_features
+        mm_model.get_image_features = lambda *a, **kw: cached
+        try:
+            yield
+        finally:
+            mm_model.get_image_features = original
+
+    return _cm()
 
 
 def prepare_qwen_visual_only_inputs_batch(
@@ -781,6 +917,80 @@ def _strip_qwen_trailing_thinking_text(text_prompt: str) -> str:
         if text_prompt.endswith(marker):
             return text_prompt[: -len(marker)]
     return text_prompt
+
+
+_QWEN_THINK_BLOCK_RE = re.compile(r"^\s*<think>.*?</think>\s*", flags=re.DOTALL)
+
+
+def strip_qwen_thinking_prefix(raw_text: str) -> str:
+    """Remove a leading Qwen '<think>...</think>' block that Qwen3.5 emits
+    even when the chat template sets enable_thinking=False. Safe to call on
+    any string — it is a no-op when no block is present."""
+    if not raw_text:
+        return raw_text
+    return _QWEN_THINK_BLOCK_RE.sub("", raw_text, count=1).strip()
+
+
+def append_qwen_empty_thinking_preamble(
+    batch: Dict[str, torch.Tensor],
+    device: torch.device,
+) -> Dict[str, torch.Tensor]:
+    """Append ``<think>\n</think>\n\n`` before Qwen generation.
+
+    With Qwen's empty thinking block prefilled in the prompt, generated token
+    step 0 corresponds to the first visible answer token instead of the
+    ``<think>`` delimiter. Sequence-shaped masks/type ids are extended so the
+    model treats the preamble as normal text.
+    """
+    input_ids = batch.get("input_ids")
+    if input_ids is None or input_ids.ndim != 2 or input_ids.shape[0] != 1:
+        return batch
+
+    preamble = torch.tensor(
+        [_QWEN_EMPTY_THINKING_PREAMBLE_IDS],
+        device=device,
+        dtype=input_ids.dtype,
+    )
+    preamble_len = int(preamble.shape[1])
+    seq_len = int(input_ids.shape[1])
+
+    updated: Dict[str, torch.Tensor] = {}
+    for key, value in batch.items():
+        if not isinstance(value, torch.Tensor):
+            updated[key] = value
+            continue
+
+        if key == "input_ids":
+            updated[key] = torch.cat([value, preamble], dim=1)
+            continue
+
+        if value.ndim >= 2 and value.shape[0] == input_ids.shape[0] and value.shape[1] == seq_len:
+            if key == "attention_mask":
+                pad_value = 1
+            else:
+                pad_value = 0
+            pad = torch.full(
+                (value.shape[0], preamble_len, *value.shape[2:]),
+                pad_value,
+                device=value.device,
+                dtype=value.dtype,
+            )
+            updated[key] = torch.cat([value, pad], dim=1)
+        else:
+            updated[key] = value
+
+    return updated
+
+
+def qwen_patching_max_new_tokens(
+    adapter: "VLMAdapter", dataset_default: int
+) -> int:
+    """Qwen needs extra budget to get past the '<think></think>' preamble
+    before emitting the real answer. Use at least 20 tokens for Qwen; leave
+    other families unchanged."""
+    if adapter.family == "qwen":
+        return max(dataset_default, 20)
+    return dataset_default
 
 
 def _strip_qwen_trailing_thinking_tokens(batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:

@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LLaVA VQA-v2 Smoke Layer Sweep</title>
+  <style>
+    :root { color-scheme: light; --bg:#f6f7f9; --panel:#fff; --ink:#17202a; --muted:#647084; --line:#d9dee7; --accent:#0f766e; --accent-soft:#d9f4ef; --bad:#b42318; --good:#067647; --warn:#a15c07; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:var(--bg); color:var(--ink); }
+    header { padding:16px 22px; background:var(--panel); border-bottom:1px solid var(--line); display:flex; align-items:center; justify-content:space-between; gap:16px; }
+    h1 { font-size:18px; line-height:1.2; margin:0; font-weight:650; }
+    .sub { color:var(--muted); font-size:13px; margin-top:4px; }
+    a { color:var(--accent); text-decoration:none; }
+    main { max-width:1320px; margin:0 auto; padding:18px; display:grid; gap:16px; }
+    section { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px; }
+    h2 { font-size:16px; margin:0 0 12px; }
+    .controls { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    select, input { min-height:36px; border:1px solid var(--line); border-radius:6px; padding:0 10px; font-size:14px; background:#fff; color:var(--ink); }
+    select { min-width:360px; }
+    label { color:var(--muted); font-size:13px; display:flex; gap:6px; align-items:center; }
+    table { width:100%; border-collapse:collapse; background:#fff; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+    th, td { padding:9px 10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; font-size:13px; }
+    th { background:#f8fafc; color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.02em; }
+    tr:last-child td { border-bottom:0; }
+    .num { font-variant-numeric:tabular-nums; }
+    .good { color:var(--good); font-weight:650; }
+    .bad { color:var(--bad); font-weight:650; }
+    .warn { color:var(--warn); font-weight:650; }
+    .facts { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:12px; }
+    .fact { border:1px solid var(--line); border-radius:6px; padding:10px; background:#fbfcfd; }
+    .label { color:var(--muted); font-size:12px; margin-bottom:4px; display:block; }
+    .value { font-size:14px; font-weight:620; overflow-wrap:anywhere; }
+    .images { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+    figure { margin:0; background:#fff; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+    figcaption { padding:10px 12px; font-size:13px; color:var(--muted); border-bottom:1px solid var(--line); }
+    img { width:100%; height:360px; display:block; object-fit:contain; background:#eef1f5; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+    .note { color:var(--muted); font-size:13px; line-height:1.45; }
+    @media (max-width:980px){ .grid,.images,.facts{grid-template-columns:1fr;} select{min-width:100%;} img{height:300px;} }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>LLaVA VQA-v2 Smoke Layer Sweep</h1>
+      <div class="sub" id="subtitle">Loading...</div>
+    </div>
+    <a href="index.html">Back to main browser</a>
+  </header>
+  <main>
+    <section>
+      <h2>Mean Results</h2>
+      <p class="note" id="note"></p>
+      <div id="summary"></div>
+    </section>
+    <section>
+      <h2>Sample Inspector</h2>
+      <div class="controls">
+        <select id="sampleSelect"></select>
+        <label><input id="lateOnly" type="checkbox" checked /> layers 22-31 only</label>
+      </div>
+      <div id="sample"></div>
+    </section>
+  </main>
+<script>
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt = (x) => Number(x).toFixed(4);
+const imageUrl = (uid, kind) => `image/${encodeURIComponent(uid)}?kind=${kind}`;
+const clsDelta = (x) => Number(x) > 0.0001 ? 'good' : Number(x) < -0.0001 ? 'bad' : '';
+let data;
+
+function meanRow(r, cleanScore, cleanTop1) {
+  const scoreDelta = Number(r.mean_score) - cleanScore;
+  const top1Delta = Number(r.mean_top1_probability) - cleanTop1;
+  return `<tr>
+    <td>${esc(r.label)}</td>
+    <td class="num ${clsDelta(scoreDelta)}">${fmt(r.mean_score)}</td>
+    <td class="num ${clsDelta(scoreDelta)}">${fmt(scoreDelta)}</td>
+    <td class="num ${clsDelta(top1Delta)}">${fmt(r.mean_top1_probability)}</td>
+    <td class="num ${clsDelta(top1Delta)}">${fmt(top1Delta)}</td>
+  </tr>`;
+}
+
+function renderSummary() {
+  const clean = data.summary.find(r => r.label === 'clean');
+  const cleanScore = Number(clean.mean_score);
+  const cleanTop1 = Number(clean.mean_top1_probability);
+  document.getElementById('note').textContent = data.note;
+  document.getElementById('summary').innerHTML = `<table>
+    <thead><tr><th>Run</th><th>Mean score</th><th>Score - clean</th><th>Mean top-1 prob</th><th>Top-1 - clean</th></tr></thead>
+    <tbody>${data.summary.map(r => meanRow(r, cleanScore, cleanTop1)).join('')}</tbody>
+  </table>`;
+}
+
+function layerRow(r, cleanScore, cleanTop1) {
+  const scoreDelta = Number(r.score) - cleanScore;
+  const top1Delta = Number(r.top1_probability) - cleanTop1;
+  return `<tr>
+    <td>${esc(r.label)}</td>
+    <td>${esc(r.answer)}</td>
+    <td class="num ${clsDelta(scoreDelta)}">${fmt(r.score)}</td>
+    <td class="num ${clsDelta(scoreDelta)}">${fmt(scoreDelta)}</td>
+    <td class="num ${clsDelta(top1Delta)}">${fmt(r.top1_probability)}</td>
+    <td class="num ${clsDelta(top1Delta)}">${fmt(top1Delta)}</td>
+  </tr>`;
+}
+
+function renderSample() {
+  const selected = document.getElementById('sampleSelect').value;
+  const sample = data.samples.find(s => s.sample_id === selected) || data.samples[0];
+  const lateOnly = document.getElementById('lateOnly').checked;
+  const rows = sample.runs.filter(r => !lateOnly || r.kind !== 'layer' || Number(r.layer) >= 22);
+  const clean = sample.runs.find(r => r.label === 'clean');
+  const cleanScore = Number(clean.score);
+  const cleanTop1 = Number(clean.top1_probability);
+  document.getElementById('sample').innerHTML = `
+    <div class="facts">
+      <div class="fact"><div class="label">Question</div><div class="value">${esc(sample.question)}</div></div>
+      <div class="fact"><div class="label">Sample ID</div><div class="value">${esc(sample.sample_id)}</div></div>
+      <div class="fact"><div class="label">Most common GT</div><div class="value">${esc(sample.most_common_gt_answer)}</div></div>
+      <div class="fact"><div class="label">All GT answers</div><div class="value">${esc(sample.all_gt_answers)}</div></div>
+    </div>
+    <div class="grid" style="margin-top:16px">
+      <div class="images">
+        <figure><figcaption>Clean image</figcaption><img src="${imageUrl(sample.uid,'clean')}" alt="Clean image" /></figure>
+        <figure><figcaption>Corrupted image</figcaption><img src="${imageUrl(sample.uid,'corrupted')}" alt="Corrupted image" /></figure>
+      </div>
+      <table>
+        <thead><tr><th>Run</th><th>Answer</th><th>Score</th><th>Score - clean</th><th>Top-1 prob</th><th>Top-1 - clean</th></tr></thead>
+        <tbody>${rows.map(r => layerRow(r, cleanScore, cleanTop1)).join('')}</tbody>
+      </table>
+    </div>`;
+}
+
+fetch('smoke_layer_sweep.json').then(r => r.json()).then(json => {
+  data = json;
+  document.getElementById('subtitle').textContent = `${data.samples.length} samples, ${data.num_layers} layers, ${data.position}`;
+  const select = document.getElementById('sampleSelect');
+  select.innerHTML = data.samples.map(s => `<option value="${esc(s.sample_id)}">${esc(s.sample_id)}: ${esc(s.question)}</option>`).join('');
+  select.addEventListener('input', renderSample);
+  document.getElementById('lateOnly').addEventListener('input', renderSample);
+  renderSummary();
+  renderSample();
+});
+</script>
+</body>
+</html>

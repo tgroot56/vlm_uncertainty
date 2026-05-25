@@ -5,7 +5,7 @@
 #SBATCH --job-name=llava_patch_collect
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=24:00:00
+#SBATCH --time=04:00:00
 #SBATCH --output=slurm_outputs/patching/llava/generate_dataset_%A.out
 
 module purge
@@ -31,13 +31,16 @@ mkdir -p slurm_outputs/patching/llava
 
 VLM_ID="${VLM_ID:-llava-hf/llava-1.5-7b-hf}"
 VLM_SHORT="${VLM_ID//\//_}"
-DATASET="${DATASET:-vqa-v2}"
+DATASET="${DATASET:-imagenet-r}"
 SEED="${SEED:-42}"
 DEVICE="${DEVICE:-cuda}"
 MIDDLE_LAYER="${MIDDLE_LAYER:-16}"
 
 PATCHING_DATASET="${PATCHING_DATASET:-$VLM_UQ_STORAGE_ROOT/patching/${VLM_SHORT//./-}/$DATASET/patching_dataset_$DATASET.json}"
-OUTPUT_DIR="${OUTPUT_DIR:-$VLM_UQ_USER_STORAGE_ROOT/patching/supervised_datasets}"
+OUTPUT_DIR="${OUTPUT_DIR:-$VLM_UQ_STORAGE_ROOT/patching/supervised_datasets/${VLM_SHORT//./-}/$DATASET}"
+
+echo "Using patching dataset: $PATCHING_DATASET"
+echo "Saving activations under: $OUTPUT_DIR/${VLM_SHORT//./-}"
 
 srun python -u -m src.cli.collect_patching_activations \
   --patching_dataset "$PATCHING_DATASET" \

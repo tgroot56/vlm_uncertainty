@@ -1,0 +1,90 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --job-name=llava_vqa_v2_hard_finallayer_probes
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --mem=180G
+#SBATCH --time=08:00:00
+#SBATCH --output=slurm_outputs/probing/llava_vqa_v2_hard_finallayer_probes_%A.out
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+cd "$HOME/vlm_uncertainty/" || exit 1
+
+source activate llava-experiments
+
+mkdir -p slurm_outputs/probing
+
+export VLM_UQ_STORAGE_ROOT="${VLM_UQ_STORAGE_ROOT:-/projects/prjs2014}"
+export VLM_UQ_USER_STORAGE_ROOT="${VLM_UQ_USER_STORAGE_ROOT:-$VLM_UQ_STORAGE_ROOT/$USER}"
+export HF_HOME="${HF_HOME:-$VLM_UQ_USER_STORAGE_ROOT/hf_home}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_datasets}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_transformers}"
+
+mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$TRANSFORMERS_CACHE"
+
+SOURCE_DATA_PATH="${SOURCE_DATA_PATH:-/projects/prjs2014/supervised_datasets/vqa-v2/llava-hf/llava-1.5-7b-hf/run_7f57ad86ba/supervision_dataset.pt}"
+SLIM_DATA_PATH="${SLIM_DATA_PATH:-$VLM_UQ_USER_STORAGE_ROOT/probe_results/vqa_hard_exact/llava_vqa_component_finallayer_slim.pt}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-probe_results/llava/vqa-v2-hard-exact}"
+MODEL_TYPE="${MODEL_TYPE:-mlp}"
+NUM_EPOCHS="${NUM_EPOCHS:-20}"
+BATCH_SIZE="${BATCH_SIZE:-32}"
+SEED="${SEED:-42}"
+
+FEATURE_LIST=(
+  vision_mean_layer_-1
+  lm_visual_mean_layer_-1
+  lm_question_lasttok_layer_-1
+  lm_fullspan_lasttok_layer_-1
+  lm_answer_lasttok_layer_-1
+  answer_gen_entropy_mean
+  answer_gen_neglogp_mean
+)
+
+if [[ ! -f "$SLIM_DATA_PATH" ]]; then
+  echo "Building slim LLaVA VQA-v2 final-layer component dataset"
+  mkdir -p "$(dirname "$SLIM_DATA_PATH")"
+  python scripts/probing/build_slim_probe_dataset.py \
+    --input "$SOURCE_DATA_PATH" \
+    --output "$SLIM_DATA_PATH" \
+    --features "${FEATURE_LIST[@]}"
+else
+  echo "Using existing slim dataset: $SLIM_DATA_PATH"
+fi
+
+for SHUFFLE_TRAIN_LABELS in 0 1; do
+  if [[ "$SHUFFLE_TRAIN_LABELS" == "1" ]]; then
+    OUTPUT_DIR="$OUTPUT_ROOT/shuffle_train_labels"
+    SHUFFLE_ARGS=(--shuffle_train_labels)
+  else
+    OUTPUT_DIR="$OUTPUT_ROOT"
+    SHUFFLE_ARGS=()
+  fi
+
+  mkdir -p "$OUTPUT_DIR"
+
+  echo "OUTPUT_DIR=$OUTPUT_DIR"
+  echo "SHUFFLE_TRAIN_LABELS=$SHUFFLE_TRAIN_LABELS"
+
+  for FEATURE in "${FEATURE_LIST[@]}"; do
+    echo "============================================================"
+    echo "Running hard-label LLaVA VQA-v2 (final-layer) probe for feature: ${FEATURE}"
+    echo "============================================================"
+
+    srun python -m src.cli.train \
+      --data_path "$SLIM_DATA_PATH" \
+      --features "$FEATURE" \
+      --model_type "$MODEL_TYPE" \
+      --num_epochs "$NUM_EPOCHS" \
+      --batch_size "$BATCH_SIZE" \
+      --output_dir "$OUTPUT_DIR" \
+      --seed "$SEED" \
+      --no_class_weights \
+      --binarize_one_score_labels \
+      "${SHUFFLE_ARGS[@]}"
+  done
+done

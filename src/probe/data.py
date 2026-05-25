@@ -8,6 +8,53 @@ from typing import List, Dict, Tuple, Optional
 import numpy as np
 
 
+def _infer_feature_dim(name: str) -> int:
+    if name.startswith("vision_"):
+        return 1024
+    if name.startswith("visual_merged_"):
+        return 4096
+    if name.startswith("lm_"):
+        return 4096
+    if name.startswith("answer_gen_"):
+        return 1
+    raise ValueError(f"Unknown feature name pattern: {name}")
+
+
+def build_feature_slice_map(
+    feature_names: List[str],
+    feature_dims: Optional[List[int]],
+    total_dim: int,
+) -> Dict[str, slice]:
+    """Map each feature-block name to its column slice in the concatenated X matrix.
+
+    Mirrors the layout used at dataset-build time so callers (probe training and
+    downstream analyses) all read X with identical block boundaries.
+    """
+    if feature_dims is not None:
+        if len(feature_dims) != len(feature_names):
+            raise ValueError(
+                f"feature_dims length mismatch: got {len(feature_dims)} dims for "
+                f"{len(feature_names)} feature names."
+            )
+        dims_iter = feature_dims
+    else:
+        dims_iter = [_infer_feature_dim(n) for n in feature_names]
+
+    offset = 0
+    name_to_slice: Dict[str, slice] = {}
+    for n, d in zip(feature_names, dims_iter):
+        name_to_slice[n] = slice(offset, offset + d)
+        offset += d
+
+    if offset != total_dim:
+        raise ValueError(
+            f"Feature dim inference mismatch: inferred total {offset} "
+            f"but X has {total_dim} columns. "
+            f"Fix _infer_feature_dim() or store feature_dims in the dataset."
+        )
+    return name_to_slice
+
+
 class SupervisionDataset(Dataset):
     def __init__(self, data_path: str, feature_names: list[str], normalize: bool = True):
         data_path = data_path.strip()
@@ -22,42 +69,7 @@ class SupervisionDataset(Dataset):
         all_names = payload["feature_names"]  # length = number of feature blocks (24)
         feature_dims = payload.get("feature_dims", None)
 
-        # ---- infer per-block dimensions (works for your current feature set) ----
-        def infer_dim(name: str) -> int:
-            if name.startswith("vision_"):
-                return 1024
-            if name.startswith("visual_merged_"):
-                return 4096
-            if name.startswith("lm_"):
-                return 4096
-            if name.startswith("answer_gen_"):
-                return 1
-            raise ValueError(f"Unknown feature name pattern: {name}")
-
-        # Build name -> slice over X_all columns, in the order blocks were concatenated
-        offset = 0
-        name_to_slice = {}
-        if feature_dims is not None:
-            if len(feature_dims) != len(all_names):
-                raise ValueError(
-                    f"feature_dims length mismatch: got {len(feature_dims)} dims for "
-                    f"{len(all_names)} feature names."
-                )
-            dims_iter = feature_dims
-        else:
-            dims_iter = [infer_dim(n) for n in all_names]
-
-        for n, d in zip(all_names, dims_iter):
-            name_to_slice[n] = slice(offset, offset + d)
-            offset += d
-
-        # Sanity: does this reconstruction match X_all width?
-        if offset != X_all.shape[1]:
-            raise ValueError(
-                f"Feature dim inference mismatch: inferred total {offset} "
-                f"but X has {X_all.shape[1]} columns. "
-                f"Fix infer_dim() or store feature_dims in the dataset."
-            )
+        name_to_slice = build_feature_slice_map(all_names, feature_dims, X_all.shape[1])
 
         # Validate requested feature names
         missing = [n for n in feature_names if n not in name_to_slice]

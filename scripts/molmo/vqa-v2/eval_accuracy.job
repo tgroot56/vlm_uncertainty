@@ -1,0 +1,46 @@
+#!/bin/bash
+
+# Accuracy-only evaluation of Molmo2 on 1000 VQA-v2 samples using our
+# score_vqa soft-accuracy function. No features, no supervision dataset —
+# just raw generation + scoring.
+
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --job-name=molmo_vqa_v2_eval
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=0:45:00
+#SBATCH --output=slurm_outputs/molmo/vqa-v2/eval_accuracy_%A.out
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+cd "$HOME/vlm_uncertainty/" || exit 1
+
+source activate llava-experiments
+
+export VLM_UQ_STORAGE_ROOT="${VLM_UQ_STORAGE_ROOT:-/projects/prjs2014}"
+export VLM_UQ_USER_STORAGE_ROOT="${VLM_UQ_USER_STORAGE_ROOT:-$VLM_UQ_STORAGE_ROOT/$USER}"
+
+export HF_HOME="${HF_HOME:-$VLM_UQ_USER_STORAGE_ROOT/hf_home}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_datasets}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_transformers}"
+
+mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$TRANSFORMERS_CACHE"
+export VLM_UQ_PREP_CACHE="${VLM_UQ_PREP_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/vlm_uq_prepared_cache}"
+mkdir -p "$VLM_UQ_PREP_CACHE"
+mkdir -p slurm_outputs/molmo/vqa-v2
+
+VLM_ID="${VLM_ID:-allenai/Molmo2-O-7B}"
+DATASET="${DATASET:-vqa-v2}"
+MAX_SAMPLES="${MAX_SAMPLES:-1000}"
+SEED="${SEED:-42}"
+DEVICE="${DEVICE:-cuda}"
+
+srun python -u scripts/molmo/vqa-v2/eval_accuracy.py \
+  --vlm "$VLM_ID" \
+  --dataset "$DATASET" \
+  --max_samples "$MAX_SAMPLES" \
+  --seed "$SEED" \
+  --device "$DEVICE"

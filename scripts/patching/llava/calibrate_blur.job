@@ -31,13 +31,28 @@ mkdir -p slurm_outputs/patching/llava
 
 VLM_ID="${VLM_ID:-llava-hf/llava-1.5-7b-hf}"
 DATASET="${DATASET:-vqa-v2}"
+DATASET_SPLIT="${DATASET_SPLIT:-}"
 CALIBRATION_SAMPLES="${CALIBRATION_SAMPLES:-100}"
 SEED="${SEED:-42}"
 DEVICE="${DEVICE:-cuda}"
+OUTPUT_DIR="${OUTPUT_DIR:-}"
+
+if [[ "$DATASET" == "pope" && -z "$DATASET_SPLIT" ]]; then
+  DATASET_SPLIT="random"
+fi
+
+EXTRA_ARGS=()
+if [[ -n "$DATASET_SPLIT" ]]; then
+  EXTRA_ARGS+=(--dataset_split "$DATASET_SPLIT")
+fi
+if [[ -n "$OUTPUT_DIR" ]]; then
+  EXTRA_ARGS+=(--output_dir "$OUTPUT_DIR")
+fi
 
 srun python -u -m src.cli.build_patching_dataset \
   --vlm "$VLM_ID" \
   --dataset "$DATASET" \
+  "${EXTRA_ARGS[@]}" \
   --calibration_only \
   --calibration_samples "$CALIBRATION_SAMPLES" \
   --seed "$SEED" \

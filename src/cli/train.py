@@ -54,6 +54,9 @@ def parse_args():
     parser.add_argument('--shuffle_train_labels',
                         action='store_true',
                         help='Shuffle labels in training set (control experiment)')
+    parser.add_argument('--binarize_one_score_labels',
+                        action='store_true',
+                        help='Map labels to 1 only when the original score is exactly 1.0, else 0')
     parser.add_argument('--no_normalize', action='store_true',
                         help='Do not normalize features')
     parser.add_argument('--no_print_test', action='store_true',
@@ -77,4 +80,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

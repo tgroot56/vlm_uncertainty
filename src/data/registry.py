@@ -5,6 +5,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .common import prepare_coco_qa_vi_split, prepare_pope_split, prepare_vqa_v2_split
 from .datasets.imagenet_r import prepare_imagenet_r_split
+from .datasets.msts import prepare_msts_split
 
 
 @dataclass(frozen=True)
@@ -14,7 +15,7 @@ class DatasetSpec:
 
     prepare_split MUST return List[Dict] where each dict is a "prepared sample".
     """
-    hf_name: str
+    hf_name: Optional[str]
     hf_config: Optional[str] = None
     default_split: str = "test"
     prepare_split: Callable[..., List[Dict]] = None
@@ -40,8 +41,13 @@ DATASET_SPECS: Dict[str, DatasetSpec] = {
     "pope": DatasetSpec(
         hf_name="lmms-lab/POPE",
         hf_config="Full",
-        default_split="adversarial",
+        default_split="random",
         prepare_split=prepare_pope_split,
+    ),
+    "msts": DatasetSpec(
+        hf_name=None,
+        default_split="test",
+        prepare_split=prepare_msts_split,
     ),
 }
 

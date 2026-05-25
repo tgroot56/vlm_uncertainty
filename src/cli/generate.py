@@ -28,7 +28,7 @@ def parse_args():
         "--dataset",
         type=str,
         required=True,
-        help="Dataset identifier (supported: pope, vqa-v2, coco-qa-vi, imagenet-r)"
+        help="Dataset identifier (supported: pope, vqa-v2, coco-qa-vi, imagenet-r, msts)"
     )
     parser.add_argument(
         "--vlm",
@@ -43,6 +43,16 @@ def parse_args():
         type=str,
         default=default_supervision_output_root(),
         help="Root directory to store generated supervised datasets"
+    )
+    parser.add_argument(
+        "--run_name",
+        type=str,
+        default=None,
+        help=(
+            "Optional stable run directory name. When set, the output path uses "
+            "run_<run_name> instead of a hash derived from max_samples, which lets "
+            "later runs with larger --max_samples append to the same dataset."
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -137,11 +147,27 @@ def parse_args():
         type=str,
         nargs="+",
         default=None,
-        choices=["visual", "question", "answer", "fullspan_lasttok"],
+        choices=[
+            "vision",
+            "visual",
+            "visual_lasttok",
+            "question",
+            "question_lasttok",
+            "answer",
+            "answer_lasttok",
+            "fullspan_lasttok",
+            "answer_prob_entropy_stats",
+            "answer_geom_mean_probability",
+        ],
         help=(
-            "Layer-sweep mode: extract per-layer LM features for the selected families. "
+            "Layer-sweep mode: extract per-layer features for the selected families. "
+            "'vision' stores mean-pooled vision features for every vision layer. "
             "'visual', 'question', and 'answer' store mean-pooled span features for every LM layer. "
-            "'fullspan_lasttok' stores the last-token feature of the full span for every LM layer. "
+            "'*_lasttok' stores last-token span features for every LM layer. "
+            "'answer_prob_entropy_stats' stores answer-level output-distribution statistics "
+            "such as answer_gen_neglogp_mean and answer_gen_entropy_mean. "
+            "'answer_geom_mean_probability' stores the answer-level geometric-mean probability "
+            "used as answer confidence in patching experiments. "
             "When set, the generator disables the standard default feature set and stores "
             "only the requested per-layer features."
         ),

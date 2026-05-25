@@ -6,6 +6,7 @@ import os
 import json
 import hashlib
 import math
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -72,10 +73,15 @@ def _run_id_from_config(cfg: SupervisionGenConfig) -> str:
             "lm_question_including_final": cfg.use_lm_question_including_final,
             "lm_question_including_middle_lasttoken": cfg.use_lm_question_including_middle_lasttoken,
             "lm_question_including_final_lasttoken": cfg.use_lm_question_including_final_lasttoken,
+            "vision_all_layers_mean": cfg.use_vision_all_layers_mean,
             "lm_visual_all_layers_mean": cfg.use_lm_visual_all_layers_mean,
+            "lm_visual_all_layers_lasttoken": cfg.use_lm_visual_all_layers_lasttoken,
             "lm_question_all_layers_mean": cfg.use_lm_question_all_layers_mean,
+            "lm_question_all_layers_lasttoken": cfg.use_lm_question_all_layers_lasttoken,
             "lm_answer_all_layers_mean": cfg.use_lm_answer_all_layers_mean,
+            "lm_answer_all_layers_lasttoken": cfg.use_lm_answer_all_layers_lasttoken,
             "lm_fullspan_all_layers_lasttoken": cfg.use_lm_fullspan_all_layers_lasttoken,
+            "answer_geom_mean_probability": cfg.use_answer_geom_mean_probability,
         },
     }
     s = json.dumps(key, sort_keys=True).encode()
@@ -83,7 +89,10 @@ def _run_id_from_config(cfg: SupervisionGenConfig) -> str:
 
 
 def _make_output_dir(cfg: SupervisionGenConfig) -> str:
-    run_id = _run_id_from_config(cfg)
+    if cfg.run_name:
+        run_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", cfg.run_name).strip("_")
+    else:
+        run_id = _run_id_from_config(cfg)
     path_parts = [cfg.output_root, cfg.dataset_id]
     if cfg.dataset_split:
         path_parts.append(cfg.dataset_split)
@@ -91,6 +100,63 @@ def _make_output_dir(cfg: SupervisionGenConfig) -> str:
     out_dir = os.path.join(*path_parts)
     os.makedirs(out_dir, exist_ok=True)
     return out_dir
+
+
+def _load_existing_supervision_as_checkpoint(
+    pt_path: str,
+    *,
+    total_samples: int,
+) -> Optional[Dict[str, Any]]:
+    if not os.path.exists(pt_path):
+        return None
+
+    try:
+        payload = torch.load(pt_path, map_location="cpu", weights_only=False)
+        X = payload["X"].float()
+        y = payload["y"].float()
+        rows = list(payload.get("rows", []))
+        feature_names = list(payload.get("feature_names", []))
+        feature_dims = list(payload.get("feature_dims", []))
+    except Exception as e:
+        print(f"Warning: Could not load existing supervision dataset for resume: {e}")
+        return None
+
+    existing_samples = int(y.shape[0])
+    if existing_samples == 0:
+        return None
+    if existing_samples > total_samples:
+        raise RuntimeError(
+            f"Existing supervision dataset has {existing_samples} samples, "
+            f"but this run requested only {total_samples}. Use a larger --max_samples "
+            "or a different --run_name."
+        )
+
+    print(f"\nLoaded existing supervision dataset from {pt_path}")
+    print(f"  Reusing {existing_samples}/{total_samples} samples")
+    if existing_samples == total_samples:
+        print("  Existing dataset already satisfies requested sample count")
+
+    return {
+        "X_parts": list(torch.split(X, 1, dim=0)),
+        "y_list": y.tolist(),
+        "rows": rows,
+        "feature_names": feature_names,
+        "feature_dims": feature_dims,
+        "processed_indices": list(range(existing_samples)),
+    }
+
+
+def _label_progress_summary(y_list: List[float]) -> str:
+    if not y_list:
+        return "n=0"
+    y = torch.tensor(y_list, dtype=torch.float32)
+    binary_pos = int((y == 1.0).sum().item())
+    binary_neg = int((y == 0.0).sum().item())
+    return (
+        f"n={len(y_list)} label_mean={float(y.mean().item()):.4f} "
+        f"pos={binary_pos} neg={binary_neg} "
+        f"min={float(y.min().item()):.3f} max={float(y.max().item()):.3f}"
+    )
 
 
 def _load_checkpoint(checkpoint_path: str) -> Optional[Dict[str, Any]]:
@@ -368,6 +434,54 @@ def _extract_gen_prob_entropy_stats(
         f"{name_prefix}_entropy_std",
     ]
     return feats, names
+
+
+def _token_piece(processor: Any, token_id: int) -> str:
+    return processor.tokenizer.decode([int(token_id)], skip_special_tokens=False)
+
+
+def _answer_token_indices(gen_ids: torch.Tensor, processor: Any, batch_idx: int) -> List[int]:
+    """Match patching's visible-answer token selection for answer confidence."""
+    if gen_ids.ndim != 2 or batch_idx >= gen_ids.shape[0]:
+        return []
+
+    token_ids = [int(t) for t in gen_ids[batch_idx].tolist()]
+    special_ids = set(getattr(processor.tokenizer, "all_special_ids", []) or [])
+    keep = [idx for idx, token_id in enumerate(token_ids) if token_id not in special_ids]
+
+    while keep and _token_piece(processor, token_ids[keep[0]]).strip() == "":
+        keep.pop(0)
+    while keep and _token_piece(processor, token_ids[keep[-1]]).strip() == "":
+        keep.pop()
+
+    return keep
+
+
+def _extract_answer_geom_mean_probability(
+    gen_step_logits: torch.Tensor,
+    gen_ids: torch.Tensor,
+    processor: Any,
+) -> torch.Tensor:
+    rows: List[torch.Tensor] = []
+    for batch_idx in range(gen_step_logits.shape[0]):
+        answer_indices = [
+            idx for idx in _answer_token_indices(gen_ids, processor, batch_idx)
+            if idx < gen_step_logits.shape[1]
+        ]
+        if not answer_indices:
+            answer_indices = [0]
+
+        logprobs = []
+        for idx in answer_indices:
+            token_id = int(gen_ids[batch_idx, idx].item())
+            probs = F.softmax(gen_step_logits[batch_idx, idx, :].float(), dim=0)
+            logprobs.append(torch.log(probs[token_id] + 1e-10))
+
+        rows.append(torch.exp(torch.stack(logprobs).mean()).reshape(1))
+
+    feats = torch.stack(rows, dim=0)
+    _assert_valid_2d(feats, "answer_gen_geom_mean_probability")
+    return feats
 
 
 def _extract_token_sequence_mean(tokens: torch.Tensor, name: str) -> torch.Tensor:
@@ -700,6 +814,7 @@ def generate_supervised_uq_dataset(
 
     out_dir = _make_output_dir(cfg)
     checkpoint_path = os.path.join(out_dir, "checkpoint.pt")
+    pt_path = os.path.join(out_dir, "supervision_dataset.pt")
 
     if cfg.max_samples is not None:
         samples = samples[: cfg.max_samples]
@@ -713,6 +828,11 @@ def generate_supervised_uq_dataset(
     print(f"  verbose:    {cfg.verbose}")
 
     checkpoint = _load_checkpoint(checkpoint_path)
+    if checkpoint is None:
+        checkpoint = _load_existing_supervision_as_checkpoint(
+            pt_path,
+            total_samples=len(samples),
+        )
 
     if checkpoint is not None:
         X_parts = checkpoint["X_parts"]
@@ -756,7 +876,7 @@ def generate_supervised_uq_dataset(
         image = resolve_image(sample)
 
         # dataset-specific prediction kwargs (e.g., option_keys later)
-        pred_kwargs = task.predict_kwargs(sample)
+        pred_kwargs = task.predict_kwargs(sample, vlm_adapter=vlm_adapter)
 
         if "verbose" not in pred_kwargs:
             pred_kwargs["verbose"] = cfg.verbose    
@@ -770,7 +890,12 @@ def generate_supervised_uq_dataset(
             **pred_kwargs,
         )
 
-        parsed = task.interpret_output(sample=sample, prediction_output=prediction_output)
+        parsed = task.interpret_output(
+            sample=sample,
+            prediction_output=prediction_output,
+            vlm_adapter=vlm_adapter,
+            tokenizer=getattr(processor, "tokenizer", None),
+        )
         y_list.append(float(parsed["score"]))
 
         vision_hidden_states = parsed["vision_hidden_states"]
@@ -790,7 +915,16 @@ def generate_supervised_uq_dataset(
         is_qwen = "qwen" in model_id_lower
 
         if is_qwen:
-            if vision_hidden_states is not None:
+            if vision_hidden_states is not None and cfg.use_vision_all_layers_mean:
+                for layer_idx in range(len(vision_hidden_states)):
+                    _append_feature_block(
+                        per_sample_feats,
+                        per_sample_names,
+                        per_sample_dims,
+                        _extract_qwen_vision_mean_pool(vision_hidden_states, layer_idx),
+                        f"vision_mean_layer_{layer_idx}",
+                    )
+            elif vision_hidden_states is not None:
                 _append_feature_block(
                     per_sample_feats,
                     per_sample_names,
@@ -806,7 +940,7 @@ def generate_supervised_uq_dataset(
                     "vision_mean_layer_-1",
                 )
 
-            if vision_merged_states is not None:
+            if vision_merged_states is not None and not cfg.use_vision_all_layers_mean:
                 _append_feature_block(
                     per_sample_feats,
                     per_sample_names,
@@ -826,57 +960,180 @@ def generate_supervised_uq_dataset(
                 v0, v1 = token_spans["visual_start"], token_spans["visual_end"]
                 q0, q1 = token_spans["question_start"], token_spans["question_end"]
                 fs0, fs1 = token_spans["fullspan_start"], token_spans["fullspan_end"]
+                all_lm_indices = _get_all_lm_layer_indices(lm_hidden_states)
 
-                qwen_prompt_specs = [
-                    ("lm_visual_mean_layer_15", lambda: _extract_lm_mean_pool(lm_hidden_states, 15, v0, v1, name="lm_visual_mean_layer_15")),
-                    ("lm_visual_mean_layer_-1", lambda: _extract_lm_mean_pool(lm_hidden_states, -1, v0, v1, name="lm_visual_mean_layer_-1")),
-                    ("lm_visual_lasttok_layer_16", lambda: _extract_lm_last_token(lm_hidden_states, 16, v0, v1, name="lm_visual_lasttok_layer_16")),
-                    ("lm_visual_lasttok_layer_-1", lambda: _extract_lm_last_token(lm_hidden_states, -1, v0, v1, name="lm_visual_lasttok_layer_-1")),
-                    ("lm_question_mean_layer_16", lambda: _extract_lm_mean_pool(lm_hidden_states, 16, q0, q1, name="lm_question_mean_layer_16")),
-                    ("lm_question_mean_layer_-1", lambda: _extract_lm_mean_pool(lm_hidden_states, -1, q0, q1, name="lm_question_mean_layer_-1")),
-                    ("lm_question_lasttok_layer_16", lambda: _extract_lm_last_token(lm_hidden_states, 16, q0, q1, name="lm_question_lasttok_layer_16")),
-                    ("lm_question_lasttok_layer_-1", lambda: _extract_lm_last_token(lm_hidden_states, -1, q0, q1, name="lm_question_lasttok_layer_-1")),
-                    ("lm_fullspan_mean_layer_16", lambda: _extract_lm_mean_pool(lm_hidden_states, 16, fs0, fs1, name="lm_fullspan_mean_layer_16")),
-                    ("lm_fullspan_mean_layer_-1", lambda: _extract_lm_mean_pool(lm_hidden_states, -1, fs0, fs1, name="lm_fullspan_mean_layer_-1")),
-                    ("lm_fullspan_lasttok_layer_16", lambda: _extract_lm_last_token(lm_hidden_states, 16, fs0, fs1, name="lm_fullspan_lasttok_layer_16")),
-                    ("lm_fullspan_lasttok_layer_-1", lambda: _extract_lm_last_token(lm_hidden_states, -1, fs0, fs1, name="lm_fullspan_lasttok_layer_-1")),
-                    ("lm_visual_lasttok_selfattn_layer_15", lambda: _extract_lm_last_token(lm_hidden_states, 15, v0, v1, name="lm_visual_lasttok_selfattn_layer_15")),
-                    ("lm_question_mean_selfattn_layer_15", lambda: _extract_lm_mean_pool(lm_hidden_states, 15, q0, q1, name="lm_question_mean_selfattn_layer_15")),
-                    ("lm_question_lasttok_selfattn_layer_15", lambda: _extract_lm_last_token(lm_hidden_states, 15, q0, q1, name="lm_question_lasttok_selfattn_layer_15")),
-                    ("lm_fullspan_mean_selfattn_layer_15", lambda: _extract_lm_mean_pool(lm_hidden_states, 15, fs0, fs1, name="lm_fullspan_mean_selfattn_layer_15")),
-                    ("lm_fullspan_lasttok_selfattn_layer_15", lambda: _extract_lm_last_token(lm_hidden_states, 15, fs0, fs1, name="lm_fullspan_lasttok_selfattn_layer_15")),
-                ]
+                if cfg.use_lm_visual_all_layers_mean:
+                    for layer_idx in all_lm_indices:
+                        _append_feature_block(
+                            per_sample_feats,
+                            per_sample_names,
+                            per_sample_dims,
+                            _extract_lm_mean_pool(
+                                lm_hidden_states,
+                                layer_idx,
+                                v0,
+                                v1,
+                                name=f"lm_visual_all_layers_{layer_idx}",
+                            ),
+                            f"lm_visual_mean_layer_{layer_idx}",
+                        )
 
-                for feature_name, feature_fn in qwen_prompt_specs:
-                    _append_feature_block(
-                        per_sample_feats,
-                        per_sample_names,
-                        per_sample_dims,
-                        feature_fn(),
-                        feature_name,
-                    )
+                if cfg.use_lm_visual_all_layers_lasttoken:
+                    for layer_idx in all_lm_indices:
+                        _append_feature_block(
+                            per_sample_feats,
+                            per_sample_names,
+                            per_sample_dims,
+                            _extract_lm_last_token(
+                                lm_hidden_states,
+                                layer_idx,
+                                v0,
+                                v1,
+                                name=f"lm_visual_all_layers_lasttok_{layer_idx}",
+                            ),
+                            f"lm_visual_lasttok_layer_{layer_idx}",
+                        )
+
+                if cfg.use_lm_question_all_layers_mean:
+                    for layer_idx in all_lm_indices:
+                        _append_feature_block(
+                            per_sample_feats,
+                            per_sample_names,
+                            per_sample_dims,
+                            _extract_lm_mean_pool(
+                                lm_hidden_states,
+                                layer_idx,
+                                q0,
+                                q1,
+                                name=f"lm_question_all_layers_{layer_idx}",
+                            ),
+                            f"lm_question_mean_layer_{layer_idx}",
+                        )
+
+                if cfg.use_lm_question_all_layers_lasttoken:
+                    for layer_idx in all_lm_indices:
+                        _append_feature_block(
+                            per_sample_feats,
+                            per_sample_names,
+                            per_sample_dims,
+                            _extract_lm_last_token(
+                                lm_hidden_states,
+                                layer_idx,
+                                q0,
+                                q1,
+                                name=f"lm_question_all_layers_lasttok_{layer_idx}",
+                            ),
+                            f"lm_question_lasttok_layer_{layer_idx}",
+                        )
+
+                if cfg.use_lm_fullspan_all_layers_lasttoken:
+                    for layer_idx in all_lm_indices:
+                        _append_feature_block(
+                            per_sample_feats,
+                            per_sample_names,
+                            per_sample_dims,
+                            _extract_lm_last_token(
+                                lm_hidden_states,
+                                layer_idx,
+                                fs0,
+                                fs1,
+                                name=f"lm_fullspan_all_layers_lasttok_{layer_idx}",
+                            ),
+                            f"lm_fullspan_lasttok_layer_{layer_idx}",
+                        )
+
+                if not (
+                    cfg.use_lm_visual_all_layers_mean
+                    or cfg.use_lm_visual_all_layers_lasttoken
+                    or cfg.use_lm_question_all_layers_mean
+                    or cfg.use_lm_question_all_layers_lasttoken
+                    or cfg.use_lm_fullspan_all_layers_lasttoken
+                ):
+                    qwen_prompt_specs = [
+                        ("lm_visual_mean_layer_15", lambda: _extract_lm_mean_pool(lm_hidden_states, 15, v0, v1, name="lm_visual_mean_layer_15")),
+                        ("lm_visual_mean_layer_-1", lambda: _extract_lm_mean_pool(lm_hidden_states, -1, v0, v1, name="lm_visual_mean_layer_-1")),
+                        ("lm_visual_lasttok_layer_16", lambda: _extract_lm_last_token(lm_hidden_states, 16, v0, v1, name="lm_visual_lasttok_layer_16")),
+                        ("lm_visual_lasttok_layer_-1", lambda: _extract_lm_last_token(lm_hidden_states, -1, v0, v1, name="lm_visual_lasttok_layer_-1")),
+                        ("lm_question_mean_layer_16", lambda: _extract_lm_mean_pool(lm_hidden_states, 16, q0, q1, name="lm_question_mean_layer_16")),
+                        ("lm_question_mean_layer_-1", lambda: _extract_lm_mean_pool(lm_hidden_states, -1, q0, q1, name="lm_question_mean_layer_-1")),
+                        ("lm_question_lasttok_layer_16", lambda: _extract_lm_last_token(lm_hidden_states, 16, q0, q1, name="lm_question_lasttok_layer_16")),
+                        ("lm_question_lasttok_layer_-1", lambda: _extract_lm_last_token(lm_hidden_states, -1, q0, q1, name="lm_question_lasttok_layer_-1")),
+                        ("lm_fullspan_mean_layer_16", lambda: _extract_lm_mean_pool(lm_hidden_states, 16, fs0, fs1, name="lm_fullspan_mean_layer_16")),
+                        ("lm_fullspan_mean_layer_-1", lambda: _extract_lm_mean_pool(lm_hidden_states, -1, fs0, fs1, name="lm_fullspan_mean_layer_-1")),
+                        ("lm_fullspan_lasttok_layer_16", lambda: _extract_lm_last_token(lm_hidden_states, 16, fs0, fs1, name="lm_fullspan_lasttok_layer_16")),
+                        ("lm_fullspan_lasttok_layer_-1", lambda: _extract_lm_last_token(lm_hidden_states, -1, fs0, fs1, name="lm_fullspan_lasttok_layer_-1")),
+                        ("lm_visual_lasttok_selfattn_layer_15", lambda: _extract_lm_last_token(lm_hidden_states, 15, v0, v1, name="lm_visual_lasttok_selfattn_layer_15")),
+                        ("lm_question_mean_selfattn_layer_15", lambda: _extract_lm_mean_pool(lm_hidden_states, 15, q0, q1, name="lm_question_mean_selfattn_layer_15")),
+                        ("lm_question_lasttok_selfattn_layer_15", lambda: _extract_lm_last_token(lm_hidden_states, 15, q0, q1, name="lm_question_lasttok_selfattn_layer_15")),
+                        ("lm_fullspan_mean_selfattn_layer_15", lambda: _extract_lm_mean_pool(lm_hidden_states, 15, fs0, fs1, name="lm_fullspan_mean_selfattn_layer_15")),
+                        ("lm_fullspan_lasttok_selfattn_layer_15", lambda: _extract_lm_last_token(lm_hidden_states, 15, fs0, fs1, name="lm_fullspan_lasttok_selfattn_layer_15")),
+                    ]
+
+                    for feature_name, feature_fn in qwen_prompt_specs:
+                        _append_feature_block(
+                            per_sample_feats,
+                            per_sample_names,
+                            per_sample_dims,
+                            feature_fn(),
+                            feature_name,
+                        )
 
             if answer_hidden_states is not None and token_spans and token_spans.get("answer_length", 0) > 0:
                 a0, a1 = token_spans["answer_start"], token_spans["answer_end"]
-                qwen_answer_specs = [
-                    ("lm_answer_mean_layer_16", lambda: _extract_lm_mean_pool(answer_hidden_states, 16, a0, a1, name="lm_answer_mean_layer_16")),
-                    ("lm_answer_mean_layer_-1", lambda: _extract_lm_mean_pool(answer_hidden_states, -1, a0, a1, name="lm_answer_mean_layer_-1")),
-                    ("lm_answer_lasttok_layer_16", lambda: _extract_lm_last_token(answer_hidden_states, 16, a0, a1, name="lm_answer_lasttok_layer_16")),
-                    ("lm_answer_lasttok_layer_-1", lambda: _extract_lm_last_token(answer_hidden_states, -1, a0, a1, name="lm_answer_lasttok_layer_-1")),
-                    ("lm_answer_mean_selfattn_layer_15", lambda: _extract_lm_mean_pool(answer_hidden_states, 15, a0, a1, name="lm_answer_mean_selfattn_layer_15")),
-                    ("lm_answer_lasttok_selfattn_layer_15", lambda: _extract_lm_last_token(answer_hidden_states, 15, a0, a1, name="lm_answer_lasttok_selfattn_layer_15")),
-                ]
+                all_answer_indices = _get_all_lm_layer_indices(answer_hidden_states)
 
-                for feature_name, feature_fn in qwen_answer_specs:
-                    _append_feature_block(
-                        per_sample_feats,
-                        per_sample_names,
-                        per_sample_dims,
-                        feature_fn(),
-                        feature_name,
-                    )
+                if cfg.use_lm_answer_all_layers_mean:
+                    for layer_idx in all_answer_indices:
+                        _append_feature_block(
+                            per_sample_feats,
+                            per_sample_names,
+                            per_sample_dims,
+                            _extract_lm_mean_pool(
+                                answer_hidden_states,
+                                layer_idx,
+                                a0,
+                                a1,
+                                name=f"lm_answer_all_layers_{layer_idx}",
+                            ),
+                            f"lm_answer_mean_layer_{layer_idx}",
+                        )
 
-        if (not is_qwen) and (cfg.use_vision_middle or cfg.use_vision_final) and vision_hidden_states is None:
+                if cfg.use_lm_answer_all_layers_lasttoken:
+                    for layer_idx in all_answer_indices:
+                        _append_feature_block(
+                            per_sample_feats,
+                            per_sample_names,
+                            per_sample_dims,
+                            _extract_lm_last_token(
+                                answer_hidden_states,
+                                layer_idx,
+                                a0,
+                                a1,
+                                name=f"lm_answer_all_layers_lasttok_{layer_idx}",
+                            ),
+                            f"lm_answer_lasttok_layer_{layer_idx}",
+                        )
+
+                if not (cfg.use_lm_answer_all_layers_mean or cfg.use_lm_answer_all_layers_lasttoken):
+                    qwen_answer_specs = [
+                        ("lm_answer_mean_layer_16", lambda: _extract_lm_mean_pool(answer_hidden_states, 16, a0, a1, name="lm_answer_mean_layer_16")),
+                        ("lm_answer_mean_layer_-1", lambda: _extract_lm_mean_pool(answer_hidden_states, -1, a0, a1, name="lm_answer_mean_layer_-1")),
+                        ("lm_answer_lasttok_layer_16", lambda: _extract_lm_last_token(answer_hidden_states, 16, a0, a1, name="lm_answer_lasttok_layer_16")),
+                        ("lm_answer_lasttok_layer_-1", lambda: _extract_lm_last_token(answer_hidden_states, -1, a0, a1, name="lm_answer_lasttok_layer_-1")),
+                        ("lm_answer_mean_selfattn_layer_15", lambda: _extract_lm_mean_pool(answer_hidden_states, 15, a0, a1, name="lm_answer_mean_selfattn_layer_15")),
+                        ("lm_answer_lasttok_selfattn_layer_15", lambda: _extract_lm_last_token(answer_hidden_states, 15, a0, a1, name="lm_answer_lasttok_selfattn_layer_15")),
+                    ]
+
+                    for feature_name, feature_fn in qwen_answer_specs:
+                        _append_feature_block(
+                            per_sample_feats,
+                            per_sample_names,
+                            per_sample_dims,
+                            feature_fn(),
+                            feature_name,
+                        )
+
+        if (not is_qwen) and (cfg.use_vision_all_layers_mean or cfg.use_vision_middle or cfg.use_vision_final) and vision_hidden_states is None:
             raise RuntimeError(
                 "Vision features were requested, but no vision hidden states were returned "
                 f"for model_id={cfg.model_id!r}. Check the VLM adapter vision_attr_paths "
@@ -884,9 +1141,20 @@ def generate_supervised_uq_dataset(
             )
 
         # Vision
-        if (not is_qwen) and vision_hidden_states is not None and (cfg.use_vision_middle or cfg.use_vision_final):
+        if (not is_qwen) and vision_hidden_states is not None and (cfg.use_vision_all_layers_mean or cfg.use_vision_middle or cfg.use_vision_final):
             n_v = len(vision_hidden_states)
             mid_v = _get_middle_idx(n_v, cfg.force_middle_layer)
+
+            if cfg.use_vision_all_layers_mean:
+                for layer_idx in range(n_v):
+                    f = _extract_vision_mean_pool(vision_hidden_states, layer_idx)
+                    _append_feature_block(
+                        per_sample_feats,
+                        per_sample_names,
+                        per_sample_dims,
+                        f,
+                        f"vision_mean_layer_{layer_idx}",
+                    )
 
             if cfg.use_vision_middle:
                 f = _extract_vision_mean_pool(vision_hidden_states, mid_v)
@@ -920,6 +1188,19 @@ def generate_supervised_uq_dataset(
                         f"lm_visual_mean_layer_{layer_idx}",
                     )
 
+            if cfg.use_lm_visual_all_layers_lasttoken:
+                for layer_idx in all_lm_indices:
+                    f = _extract_lm_last_token(
+                        lm_hidden_states, layer_idx, v0, v1, name=f"lm_visual_all_layers_lasttok_{layer_idx}"
+                    )
+                    _append_feature_block(
+                        per_sample_feats,
+                        per_sample_names,
+                        per_sample_dims,
+                        f,
+                        f"lm_visual_lasttok_layer_{layer_idx}",
+                    )
+
             if cfg.use_lm_visual_middle:
                 f = _extract_lm_mean_pool(lm_hidden_states, mid_lm, v0, v1, name=f"lm_mid_visual_{mid_lm}")
                 _append_feature_block(per_sample_feats, per_sample_names, per_sample_dims, f, f"lm_visual_mean_layer_{mid_lm}")
@@ -939,6 +1220,19 @@ def generate_supervised_uq_dataset(
                         per_sample_dims,
                         f,
                         f"lm_question_mean_layer_{layer_idx}",
+                    )
+
+            if cfg.use_lm_question_all_layers_lasttoken:
+                for layer_idx in all_lm_indices:
+                    f = _extract_lm_last_token(
+                        lm_hidden_states, layer_idx, q0, q1, name=f"lm_question_all_layers_lasttok_{layer_idx}"
+                    )
+                    _append_feature_block(
+                        per_sample_feats,
+                        per_sample_names,
+                        per_sample_dims,
+                        f,
+                        f"lm_question_lasttok_layer_{layer_idx}",
                     )
 
             if cfg.use_lm_question_middle:
@@ -1013,6 +1307,7 @@ def generate_supervised_uq_dataset(
         # Answer span features
         if (not is_qwen) and answer_hidden_states is not None and token_spans and token_spans.get("answer_length", 0) > 0 and (
             cfg.use_lm_answer_all_layers_mean
+            or cfg.use_lm_answer_all_layers_lasttoken
             or
             cfg.use_lm_answer_middle
             or cfg.use_lm_answer_final
@@ -1036,6 +1331,19 @@ def generate_supervised_uq_dataset(
                         per_sample_dims,
                         f,
                         f"lm_answer_mean_layer_{layer_idx}",
+                    )
+
+            if cfg.use_lm_answer_all_layers_lasttoken:
+                for layer_idx in all_answer_indices:
+                    f = _extract_lm_last_token(
+                        answer_hidden_states, layer_idx, a0, a1, name=f"lm_answer_all_layers_lasttok_{layer_idx}"
+                    )
+                    _append_feature_block(
+                        per_sample_feats,
+                        per_sample_names,
+                        per_sample_dims,
+                        f,
+                        f"lm_answer_lasttok_layer_{layer_idx}",
                     )
 
             if cfg.use_lm_answer_middle:
@@ -1062,6 +1370,20 @@ def generate_supervised_uq_dataset(
             for feature_name, feature_block in zip(stat_names, stat_blocks):
                 _append_feature_block(per_sample_feats, per_sample_names, per_sample_dims, feature_block, feature_name)
 
+        if cfg.use_answer_geom_mean_probability and gen_step_logits is not None and gen_ids is not None and gen_ids.shape[1] > 0:
+            geom_mean = _extract_answer_geom_mean_probability(
+                gen_step_logits=gen_step_logits,
+                gen_ids=gen_ids,
+                processor=processor,
+            )
+            _append_feature_block(
+                per_sample_feats,
+                per_sample_names,
+                per_sample_dims,
+                geom_mean,
+                "answer_gen_geom_mean_probability",
+            )
+
         if len(per_sample_feats) == 0:
             raise RuntimeError("No features were extracted for this sample. Check cfg feature flags.")
 
@@ -1087,6 +1409,7 @@ def generate_supervised_uq_dataset(
         if len(y_list) % checkpoint_every == 0:
             try:
                 _save_checkpoint(checkpoint_path, X_parts, y_list, rows, feature_names, feature_dims, list(processed_indices))
+                print(f"\nCheckpoint label sanity: {_label_progress_summary(y_list)}", flush=True)
             except Exception as e:
                 print(f"\nWarning: checkpoint save failed at {len(y_list)} samples: {e}")
 
@@ -1102,11 +1425,17 @@ def generate_supervised_uq_dataset(
         "feature_dims": feature_dims,
         "seed_offset": cfg.seed_offset,
         "max_samples": cfg.max_samples,
+        "run_name": cfg.run_name,
         "label_mean": float(y.mean().item()),
         "label_variance": float(y.var(unbiased=False).item()),
     }
 
-    pt_path = os.path.join(out_dir, "supervision_dataset.pt")
+    if hasattr(task, "metadata_extras"):
+        metadata.update(task.metadata_extras())
+
+    if hasattr(task, "write_auxiliary_outputs"):
+        task.write_auxiliary_outputs(output_dir=out_dir, rows=rows, metadata=metadata)
+
     torch.save(
         {
             "X": X,

@@ -1,0 +1,7 @@
+pandas
+pyarrow
+Pillow
+matplotlib
+streamlit
+transformers
+torch

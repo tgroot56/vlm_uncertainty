@@ -10,6 +10,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 
 import matplotlib
@@ -195,6 +196,7 @@ def _prepare_positional_sweep(
     parquet_path: str,
     min_delta: float = DELTA_THRESHOLD,
     min_pos_samples: int = MIN_POS_SAMPLES,
+    span_min_pos_samples: dict[str, int] | None = None,
 ) -> tuple[pd.DataFrame, list[int], dict, list[str], int, int]:
     """Load and filter positional sweep data.
 
@@ -229,7 +231,12 @@ def _prepare_positional_sweep(
         .reset_index(name="n")
     )
     min_n = pos_counts.groupby(["span_label", "span_rel_pos"])["n"].min()
-    valid_idx = set(min_n[min_n >= min_pos_samples].index.tolist())  # set of (span, rel_pos)
+    span_min_pos_samples = span_min_pos_samples or {}
+    valid_idx = {
+        (span_label, span_rel_pos)
+        for (span_label, span_rel_pos), n in min_n.items()
+        if n >= span_min_pos_samples.get(span_label, min_pos_samples)
+    }
     patched = patched[patched.apply(
         lambda r: (r["span_label"], r["span_rel_pos"]) in valid_idx, axis=1
     )]
@@ -1015,6 +1022,8 @@ def plot_two_metrics_cross_model_positional_sweep(
     output_name: str,
     min_delta: float = 0.0,
     min_pos_samples: int = MIN_POS_SAMPLES,
+    qwen_visual_min_fraction: float = 0.10,
+    append_nofilter_suffix: bool = True,
     title: str | None = None,
     metrics: list[str] | None = None,
 ) -> None:
@@ -1024,7 +1033,7 @@ def plot_two_metrics_cross_model_positional_sweep(
 
     n_models = len(model_entries)
     n_cols = len(datasets)
-    nofilter_suffix = "_nofilter" if min_delta <= 0 else ""
+    nofilter_suffix = "_nofilter" if append_nofilter_suffix and min_delta <= 0 else ""
 
     fig, axes = plt.subplots(
         n_models, n_cols,
@@ -1041,10 +1050,18 @@ def plot_two_metrics_cross_model_positional_sweep(
             missing = not Path(parquet_path).exists() if parquet_path else True
             if not missing:
                 try:
+                    span_min_pos_samples = None
+                    if "qwen" in model_label.lower() and qwen_visual_min_fraction > 0:
+                        n_clean = pd.read_parquet(parquet_path, columns=["condition", "sample_id"])
+                        n_clean = n_clean[n_clean["condition"] == "clean"]["sample_id"].nunique()
+                        span_min_pos_samples = {
+                            "visual": max(min_pos_samples, math.ceil(qwen_visual_min_fraction * n_clean))
+                        }
                     df, canonical_xs, span_regions, sevs, n_total, n_filtered = _prepare_positional_sweep(
                         parquet_path,
                         min_delta=min_delta,
                         min_pos_samples=min_pos_samples,
+                        span_min_pos_samples=span_min_pos_samples,
                     )
                     handles = _draw_positional_ax_two_metrics(
                         ax, df, canonical_xs, span_regions, sevs,
@@ -1121,6 +1138,8 @@ def plot_cross_model_layer_sweep(
         sharey=False, squeeze=False,
     )
 
+    fig_legend_handles: list | None = None
+
     for row, (model_label, dataset_paths) in enumerate(model_entries):
         for ds_idx, dataset in enumerate(datasets_pair):
             parquet_path = dataset_paths[dataset]
@@ -1129,6 +1148,28 @@ def plot_cross_model_layer_sweep(
                 df, layers, sevs, n_total, n_filtered = _prepare_layer_sweep(
                     parquet_path, min_delta=min_delta
                 )
+                if fig_legend_handles is None:
+                    fig_legend_handles = [
+                        plt.Line2D(
+                            [0], [0],
+                            color=SEVERITY_COLORS[s],
+                            linewidth=2,
+                            label=severity_label(s),
+                        )
+                        for s in sevs
+                    ]
+                    if raw:
+                        fig_legend_handles += [
+                            plt.Line2D([0], [0], color="#6b7280", linewidth=1.5, linestyle=":",
+                                       label="Clean baseline"),
+                            plt.Line2D([0], [0], color="#6b7280", linewidth=1.5, linestyle="--",
+                                       label="Degraded baseline"),
+                        ]
+                    else:
+                        fig_legend_handles.append(
+                            plt.Line2D([0], [0], color="#6b7280", linewidth=1.5, linestyle=":",
+                                       label="Full recovery (RR=1)")
+                        )
             for m_idx, metric in enumerate(metrics):
                 col = ds_idx * n_metrics + m_idx
                 ax  = axes[row, col]
@@ -1140,7 +1181,7 @@ def plot_cross_model_layer_sweep(
                 else:
                     _draw_layer_ax(
                         ax, df, metric, layers, sevs,
-                        show_legend=(row == 0 and col == 0),
+                        show_legend=False,
                         show_xlabel=(row == n_models - 1),
                         raw=raw,
                         show_ylabel=(col == 0),
@@ -1167,7 +1208,17 @@ def plot_cross_model_layer_sweep(
     ds_label = " & ".join(DATASET_LABELS.get(d, d) for d in datasets_pair)
     default_title = f"Layer Sweep — {ds_label}  ·  {filter_label}95% bootstrap CI"
     fig.suptitle(title if title is not None else default_title, fontsize=24, y=1.03)
-    fig.tight_layout()
+    if fig_legend_handles:
+        fig.legend(
+            handles=fig_legend_handles,
+            labels=[h.get_label() for h in fig_legend_handles],
+            loc="upper center",
+            ncol=len(fig_legend_handles),
+            frameon=False,
+            fontsize=12,
+            bbox_to_anchor=(0.5, 0.99),
+        )
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
     save(fig, output_dir, output_name + suffix + nofilter_suffix)
 
 
@@ -1179,6 +1230,7 @@ def plot_cross_model_positional_sweep(
     raw: bool = False,
     min_delta: float = DELTA_THRESHOLD,
     min_pos_samples: int = MIN_POS_SAMPLES,
+    qwen_visual_min_fraction: float = 0.10,
     title: str | None = None,
 ) -> None:
     """2-row × 4-col combined positional-sweep figure.
@@ -1205,10 +1257,18 @@ def plot_cross_model_positional_sweep(
             data_ok = False
             if Path(parquet_path).exists():
                 try:
+                    span_min_pos_samples = None
+                    if "qwen" in model_label.lower() and qwen_visual_min_fraction > 0:
+                        n_clean = pd.read_parquet(parquet_path, columns=["condition", "sample_id"])
+                        n_clean = n_clean[n_clean["condition"] == "clean"]["sample_id"].nunique()
+                        span_min_pos_samples = {
+                            "visual": max(min_pos_samples, math.ceil(qwen_visual_min_fraction * n_clean))
+                        }
                     df, canonical_xs, span_regions, sevs, n_total, n_filtered = _prepare_positional_sweep(
                         parquet_path,
                         min_delta=min_delta,
                         min_pos_samples=min_pos_samples,
+                        span_min_pos_samples=span_min_pos_samples,
                     )
                     data_ok = True
                 except Exception as exc:

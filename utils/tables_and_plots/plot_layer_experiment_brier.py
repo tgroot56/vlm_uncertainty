@@ -947,6 +947,7 @@ def main() -> None:
             extra_feature=None,
             extra_features=extra_features,
             layer_run_suffix=args.layer_run_suffix,
+            include_default_scalars=False,
             annotate_scalar_scores=False,
             title=f"{'LLaVA' if args.model == 'llava' else 'Qwen'} Layer Sweep",
         )

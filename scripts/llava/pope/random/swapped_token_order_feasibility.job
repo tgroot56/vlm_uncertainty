@@ -1,0 +1,43 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=llava_token_order_test
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --time=00:30:00
+#SBATCH --output=slurm_logs/llava_pope_random_swapped_token_order_test_%j.out
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+cd "$HOME/vlm_uncertainty/" || exit 1
+
+source activate llava-experiments
+
+export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
+
+export VLM_UQ_STORAGE_ROOT="${VLM_UQ_STORAGE_ROOT:-/projects/prjs2014}"
+export VLM_UQ_USER_STORAGE_ROOT="${VLM_UQ_USER_STORAGE_ROOT:-$VLM_UQ_STORAGE_ROOT/$USER}"
+
+export HF_HOME="${HF_HOME:-$VLM_UQ_USER_STORAGE_ROOT/hf_home}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_datasets}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_transformers}"
+export VLM_UQ_PREP_CACHE="${VLM_UQ_PREP_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/vlm_uq_prepared_cache}"
+
+mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$TRANSFORMERS_CACHE" "$VLM_UQ_PREP_CACHE"
+mkdir -p slurm_logs
+
+VLM_ID="${VLM_ID:-llava-hf/llava-1.5-7b-hf}"
+DATASET_SPLIT="${DATASET_SPLIT:-random}"
+SEED="${SEED:-42}"
+DEVICE="${DEVICE:-cuda}"
+
+srun python -u scripts/llava/pope/random/swapped_token_order_feasibility.py \
+  --vlm "$VLM_ID" \
+  --dataset_split "$DATASET_SPLIT" \
+  --seed "$SEED" \
+  --device "$DEVICE" \
+  --max_samples 5 \
+  --max_new_tokens 15

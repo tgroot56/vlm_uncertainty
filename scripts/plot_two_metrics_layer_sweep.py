@@ -46,7 +46,7 @@ model_entries = [
     ("Qwen3.5-9B",   qwen_paths),
 ]
 
-print("Generating two-metrics layer-sweep figure (no filter) ...")
+print("Generating two-metrics layer-sweep figure (no filter, unclipped recovery) ...")
 for label, paths in model_entries:
     for ds, p in paths.items():
         exists = Path(p).exists()
@@ -56,8 +56,9 @@ plot_two_metrics_cross_model_layer_sweep(
     model_entries=model_entries,
     datasets=DATASETS,
     output_dir=CROSS_OUT,
-    output_name="two_metrics_layer_sweep",
+    output_name="two_metrics_layer_sweep_unclipped",
     min_delta=0.0,
+    clip_recovery=False,
 )
 
 print("\nDone.")

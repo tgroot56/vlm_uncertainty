@@ -148,8 +148,8 @@ def plot_model_comparison_component_comparison_mlp(dfs: dict[str, Optional[pd.Da
     components = list(selected_features.values())
     columns = [
         ("vqa-v2", "VQA-v2"),
-        ("coco-qa-vi", "COCO-QA-VI"),
-        ("pope/random", "POPE Random"),
+        ("coco-qa-vi", "COCO-QA"),
+        ("pope/random", "POPE"),
         ("imagenet-r", "ImageNet-R"),
     ]
     rows = [("llava", "LLaVA"), ("qwen", "Qwen")]

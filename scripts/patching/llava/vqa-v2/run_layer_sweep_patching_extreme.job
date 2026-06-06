@@ -38,9 +38,25 @@ SEVERITY="${SEVERITY:-extreme}"
 N_PROMPT_TOKENS="${N_PROMPT_TOKENS:-4}"
 MAX_SAMPLES="${MAX_SAMPLES:-1000}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-10}"
+PLOT_AT_N_SAMPLES="${PLOT_AT_N_SAMPLES:-}"
+OUTPUT_TAG="${OUTPUT_TAG:-extreme}"
+SAVE_CLEAN_ANSWER_PROBABILITY="${SAVE_CLEAN_ANSWER_PROBABILITY:-0}"
+SAVE_STRIPPED_ANSWER_SOFTMAX="${SAVE_STRIPPED_ANSWER_SOFTMAX:-0}"
+STRIPPED_ANSWER_SOFTMAX_DTYPE="${STRIPPED_ANSWER_SOFTMAX_DTYPE:-float32}"
 
 PATCHING_DATASET="${PATCHING_DATASET:-$VLM_UQ_STORAGE_ROOT/patching/$VLM_SHORT/$DATASET/patching_dataset_$DATASET.json}"
-OUTPUT_DIR="${OUTPUT_DIR:-$VLM_UQ_STORAGE_ROOT/patching/layer_sweep_results/$VLM_SHORT/$DATASET/extreme}"
+OUTPUT_DIR="${OUTPUT_DIR:-$VLM_UQ_STORAGE_ROOT/patching/layer_sweep_results/$VLM_SHORT/$DATASET/$OUTPUT_TAG}"
+
+EXTRA_ARGS=()
+if [[ -n "$PLOT_AT_N_SAMPLES" ]]; then
+  EXTRA_ARGS+=(--plot_at_n_samples "$PLOT_AT_N_SAMPLES")
+fi
+if [[ "$SAVE_CLEAN_ANSWER_PROBABILITY" == "1" ]]; then
+  EXTRA_ARGS+=(--save_clean_answer_probability)
+fi
+if [[ "$SAVE_STRIPPED_ANSWER_SOFTMAX" == "1" ]]; then
+  EXTRA_ARGS+=(--save_stripped_answer_softmax --stripped_answer_softmax_dtype "$STRIPPED_ANSWER_SOFTMAX_DTYPE")
+fi
 
 srun python -u -m src.cli.run_layer_sweep_patching \
   --patching_dataset "$PATCHING_DATASET" \
@@ -50,4 +66,5 @@ srun python -u -m src.cli.run_layer_sweep_patching \
   --severity "$SEVERITY" \
   --device "$DEVICE" \
   --max_samples "$MAX_SAMPLES" \
-  --checkpoint_every "$CHECKPOINT_EVERY"
+  --checkpoint_every "$CHECKPOINT_EVERY" \
+  "${EXTRA_ARGS[@]}"

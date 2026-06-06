@@ -37,10 +37,10 @@ MODEL_DISPLAY = {
 }
 
 DATASET_DISPLAY = {
-    "coco-qa-vi": "COCO-QA-VI",
+    "coco-qa-vi": "COCO-QA",
     "vqa-v2": "VQA-v2",
     "imagenet-r": "ImageNet-R",
-    "pope/random": "POPE Random",
+    "pope/random": "POPE",
 }
 
 VARIANT_DISPLAY = {

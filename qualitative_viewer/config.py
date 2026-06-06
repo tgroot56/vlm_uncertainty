@@ -13,7 +13,7 @@ REPO_ROOT = Path(os.environ.get("VLM_UQ_REPO_ROOT", "/home/tgroot/vlm_uncertaint
 DATASETS = ["vqa-v2", "coco-qa-vi", "imagenet-r", "pope"]
 DATASET_LABELS = {
     "vqa-v2": "VQA-v2",
-    "coco-qa-vi": "COCO-QA-VI",
+    "coco-qa-vi": "COCO-QA",
     "imagenet-r": "ImageNet-R",
     "pope": "POPE",
 }
@@ -29,6 +29,7 @@ SPAN_ORDER = ["text_pre", "visual", "question", "assistant_marker"]
 METRICS_FOR_PLOT = ["top1_probability", "score"]
 MIN_POS_SAMPLES = 100
 QWEN_VISUAL_MIN_FRACTION = 0.10
+POSITIONAL_PATCH_LAYER = 17
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,10 @@ class ModelSpec:
     @property
     def sweep_root(self) -> Path:
         return PATCHING_ROOT / "positional_patching_results_including_visual" / self.slug
+
+    @property
+    def layer_sweep_root(self) -> Path:
+        return PATCHING_ROOT / "layer_sweep_results" / self.slug
 
 
 QWEN_SNAPSHOT = (
@@ -75,6 +80,11 @@ MODEL_SPECS = {
 }
 
 
+LAYER_SWEEP_RESULT_SUBDIR_OVERRIDES = {
+    ("LLaVA-1.5-7B", "pope"): "extreme_answer_confidence_clean_answer",
+}
+
+
 def dataset_path_component(dataset: str) -> Path:
     if dataset == "pope":
         return Path("pope/random")
@@ -88,6 +98,20 @@ def parquet_path(model_label: str, dataset: str) -> Path:
         / dataset_path_component(dataset)
         / spec.result_subdir
         / "positional_patching_results.parquet"
+    )
+
+
+def layer_sweep_path(model_label: str, dataset: str) -> Path:
+    spec = MODEL_SPECS[model_label]
+    result_subdir = LAYER_SWEEP_RESULT_SUBDIR_OVERRIDES.get(
+        (model_label, dataset),
+        spec.result_subdir,
+    )
+    return (
+        spec.layer_sweep_root
+        / dataset_path_component(dataset)
+        / result_subdir
+        / "layer_sweep_results.parquet"
     )
 
 
@@ -118,3 +142,10 @@ def all_parquet_paths() -> dict[tuple[str, str], Path]:
         for dataset in DATASETS
     }
 
+
+def all_layer_sweep_paths() -> dict[tuple[str, str], Path]:
+    return {
+        (model_label, dataset): layer_sweep_path(model_label, dataset)
+        for model_label in MODEL_SPECS
+        for dataset in DATASETS
+    }

@@ -30,27 +30,35 @@ except ModuleNotFoundError as exc:  # pragma: no cover - shown when Streamlit is
     ) from exc
 
 try:
+    from . import data_utils as data_utils_module
     from .config import DATASET_LABELS, MODEL_SPECS, OUTPUT_ROOT, SPAN_DISPLAY
     from .data_utils import (
+        all_layer_plot_rows,
         all_plot_rows,
         blurred_image_path,
         compact_row_dict,
+        ensure_viewer_helper_columns,
         format_answer_with_conf,
         ground_truth_text,
         highlighted_degraded_image,
+        highlighted_clean_marker_image,
         prompt_tokens_for_row,
         sample_record,
         token_html,
     )
 except ImportError:  # pragma: no cover - useful when running as `streamlit run app.py`.
+    import data_utils as data_utils_module  # type: ignore
     from config import DATASET_LABELS, MODEL_SPECS, OUTPUT_ROOT, SPAN_DISPLAY  # type: ignore
     from data_utils import (  # type: ignore
+        all_layer_plot_rows,
         all_plot_rows,
         blurred_image_path,
         compact_row_dict,
+        ensure_viewer_helper_columns,
         format_answer_with_conf,
         ground_truth_text,
         highlighted_degraded_image,
+        highlighted_clean_marker_image,
         prompt_tokens_for_row,
         sample_record,
         token_html,
@@ -58,15 +66,48 @@ except ImportError:  # pragma: no cover - useful when running as `streamlit run 
 
 
 st.set_page_config(
-    page_title="Qualitative positional-patching viewer",
+    page_title="Qualitative activation-patching viewer",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 
-@st.cache_data(show_spinner="Loading positional-sweep parquet files...")
-def load_rows() -> pd.DataFrame:
-    return all_plot_rows()
+@st.cache_data(show_spinner="Loading sweep parquet files...")
+def load_rows(sweep_type: str) -> pd.DataFrame:
+    if sweep_type == "Layer sweep":
+        return ensure_viewer_helper_columns(all_layer_plot_rows())
+    return ensure_viewer_helper_columns(all_plot_rows())
+
+
+def clear_app_caches() -> None:
+    load_rows.clear()
+    data_utils_module.clear_runtime_caches()
+    _export_font_properties.cache_clear()
+
+
+CORRECTNESS_PATTERNS = [
+    "C -> C -> C",
+    "C -> C -> I",
+    "C -> I -> C",
+    "C -> I -> I",
+    "I -> C -> C",
+    "I -> C -> I",
+    "I -> I -> C",
+    "I -> I -> I",
+]
+
+CORRECTNESS_PRESETS = {
+    "None": None,
+    "Accuracy recovered": "C -> I -> C",
+    "Failed recovery": "C -> I -> I",
+    "Already robust": "C -> C -> C",
+    "Patch improves beyond clean": "I -> I -> C",
+    "Patch harms accuracy": "C -> C -> I",
+}
+
+CONFIDENCE_DIRECTIONS = ["increased", "decreased", "unchanged"]
+POPE_ANSWER_BUCKETS = ["yes", "no", "other"]
+ANY_CHOICE = "Any"
 
 
 def apply_preset(df: pd.DataFrame, preset: str) -> pd.DataFrame:
@@ -108,6 +149,276 @@ def filter_tri_state(df: pd.DataFrame, label: str, col: str) -> pd.DataFrame:
     if choice == "No":
         return df[~df[col]]
     return df
+
+
+def _direction_from_delta(delta: pd.Series, tolerance: float) -> pd.Series:
+    values = pd.Series("unchanged", index=delta.index, dtype="object")
+    values[delta > tolerance] = "increased"
+    values[delta < -tolerance] = "decreased"
+    return values
+
+
+def add_confidence_direction_columns(rows: pd.DataFrame, tolerance: float) -> pd.DataFrame:
+    rows = rows.copy()
+    rows["corruption_confidence_direction"] = _direction_from_delta(rows["delta_conf_corruption"], tolerance)
+    rows["patch_confidence_direction"] = _direction_from_delta(rows["delta_conf_patch"], tolerance)
+    rows["patch_vs_clean_confidence_direction"] = _direction_from_delta(
+        rows["delta_conf_patch_vs_clean"], tolerance
+    )
+    rows["confidence_transition"] = (
+        "corruption "
+        + rows["corruption_confidence_direction"]
+        + ", patch "
+        + rows["patch_confidence_direction"]
+    )
+    return rows
+
+
+def _apply_correctness_choice(df: pd.DataFrame, col: str, choice: str) -> pd.DataFrame:
+    if choice == "Correct":
+        return df[df[col]]
+    if choice == "Incorrect":
+        return df[~df[col]]
+    return df
+
+
+def _apply_yes_no_choice(df: pd.DataFrame, col: str, choice: str) -> pd.DataFrame:
+    if choice == "Yes":
+        return df[df[col]]
+    if choice == "No":
+        return df[~df[col]]
+    return df
+
+
+def _apply_direction_choice(df: pd.DataFrame, col: str, choice: str) -> pd.DataFrame:
+    if choice == ANY_CHOICE:
+        return df
+    return df[df[col] == choice.lower()]
+
+
+def _apply_answer_bucket_choice(df: pd.DataFrame, col: str, choice: str) -> pd.DataFrame:
+    if choice == ANY_CHOICE:
+        return df
+    return df[df[col] == choice]
+
+
+def _percentage(count: pd.Series, total: int) -> pd.Series:
+    if total <= 0:
+        return pd.Series(0.0, index=count.index)
+    return (count.astype(float) / float(total) * 100.0).round(2)
+
+
+def _selected_table_value(state: Any, table: pd.DataFrame, col: str) -> str:
+    selection = getattr(state, "selection", {})
+    rows = selection.get("rows", []) if isinstance(selection, dict) else getattr(selection, "rows", [])
+    if not rows:
+        return ANY_CHOICE
+    row_index = int(rows[0])
+    if row_index < 0 or row_index >= len(table):
+        return ANY_CHOICE
+    return str(table.iloc[row_index][col])
+
+
+def correctness_summary_table(df: pd.DataFrame) -> pd.DataFrame:
+    grouped = (
+        df.groupby("correctness_pattern", dropna=False)
+        .agg(
+            count=("row_id", "size"),
+            **{
+                "mean clean confidence": ("clean_confidence", "mean"),
+                "mean corrupted confidence": ("corrupted_confidence", "mean"),
+                "mean patched confidence": ("patched_confidence", "mean"),
+                "mean delta corrupted-clean confidence": ("delta_conf_corruption", "mean"),
+                "mean delta patched-corrupted confidence": ("delta_conf_patch", "mean"),
+            },
+        )
+        .reindex(CORRECTNESS_PATTERNS)
+        .reset_index(names="correctness_pattern")
+    )
+    grouped["count"] = grouped["count"].fillna(0).astype(int)
+    grouped.insert(2, "percentage", _percentage(grouped["count"], len(df)))
+    return grouped
+
+
+def confidence_summary_table(df: pd.DataFrame) -> pd.DataFrame:
+    transitions = [
+        f"corruption {corruption}, patch {patch}"
+        for corruption in CONFIDENCE_DIRECTIONS
+        for patch in CONFIDENCE_DIRECTIONS
+    ]
+    grouped = (
+        df.groupby("confidence_transition", dropna=False)
+        .agg(
+            count=("row_id", "size"),
+            **{
+                "mean clean correctness": ("clean_correctness", "mean"),
+                "mean corrupted correctness": ("corrupted_correctness", "mean"),
+                "mean patched correctness": ("patched_correctness", "mean"),
+                "mean clean confidence": ("clean_confidence", "mean"),
+                "mean corrupted confidence": ("corrupted_confidence", "mean"),
+                "mean patched confidence": ("patched_confidence", "mean"),
+            },
+        )
+        .reindex(transitions)
+        .reset_index(names="confidence_transition")
+    )
+    grouped["count"] = grouped["count"].fillna(0).astype(int)
+    grouped.insert(2, "percentage", _percentage(grouped["count"], len(df)))
+    return grouped
+
+
+def answer_summary_table(df: pd.DataFrame, dataset: str) -> pd.DataFrame:
+    grouped = (
+        df.groupby("answer_transition", dropna=False)
+        .agg(
+            count=("row_id", "size"),
+            **{
+                "mean clean correctness": ("clean_correctness", "mean"),
+                "mean corrupted correctness": ("corrupted_correctness", "mean"),
+                "mean patched correctness": ("patched_correctness", "mean"),
+                "mean clean confidence": ("clean_confidence", "mean"),
+                "mean corrupted confidence": ("corrupted_confidence", "mean"),
+                "mean patched confidence": ("patched_confidence", "mean"),
+            },
+        )
+        .sort_values("count", ascending=False)
+    )
+    if dataset == "pope":
+        transitions = [
+            f"{clean} -> {corrupted} -> {patched}"
+            for clean in POPE_ANSWER_BUCKETS
+            for corrupted in POPE_ANSWER_BUCKETS
+            for patched in POPE_ANSWER_BUCKETS
+        ]
+        grouped = grouped.reindex(transitions)
+    else:
+        grouped = grouped.head(20)
+    grouped = grouped.reset_index(names="answer_transition")
+    grouped["count"] = grouped["count"].fillna(0).astype(int)
+    grouped.insert(2, "percentage", _percentage(grouped["count"], len(df)))
+    return grouped
+
+
+def validation_summary_tables(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    totals = df.groupby(["model", "dataset"])["row_id"].size().rename("total")
+    combos = df[["model", "dataset"]].drop_duplicates().assign(_join_key=1)
+
+    correctness_counts = (
+        df.groupby(["model", "dataset", "correctness_pattern"])["row_id"]
+        .size()
+        .rename("count")
+        .reset_index()
+    )
+    correctness_categories = pd.DataFrame({"correctness_pattern": CORRECTNESS_PATTERNS, "_join_key": 1})
+    correctness = (
+        combos.merge(correctness_categories, on="_join_key", how="outer")
+        .drop(columns=["_join_key"])
+        .merge(correctness_counts, on=["model", "dataset", "correctness_pattern"], how="left")
+        .merge(totals.reset_index(), on=["model", "dataset"], how="left")
+    )
+    correctness["count"] = correctness["count"].fillna(0).astype(int)
+    correctness["percentage"] = (correctness["count"] / correctness["total"] * 100).round(2)
+    correctness = correctness.drop(columns=["total"]).sort_values(["model", "dataset", "correctness_pattern"])
+
+    confidence_counts = (
+        df.groupby(["model", "dataset", "confidence_transition"])["row_id"]
+        .size()
+        .rename("count")
+        .reset_index()
+    )
+    confidence_transitions = [
+        f"corruption {corruption}, patch {patch}"
+        for corruption in CONFIDENCE_DIRECTIONS
+        for patch in CONFIDENCE_DIRECTIONS
+    ]
+    confidence_categories = pd.DataFrame({"confidence_transition": confidence_transitions, "_join_key": 1})
+    confidence = (
+        combos.merge(confidence_categories, on="_join_key", how="outer")
+        .drop(columns=["_join_key"])
+        .merge(confidence_counts, on=["model", "dataset", "confidence_transition"], how="left")
+        .merge(totals.reset_index(), on=["model", "dataset"], how="left")
+    )
+    confidence["count"] = confidence["count"].fillna(0).astype(int)
+    confidence["percentage"] = (confidence["count"] / confidence["total"] * 100).round(2)
+    confidence = confidence.drop(columns=["total"]).sort_values(["model", "dataset", "confidence_transition"])
+    return correctness, confidence
+
+
+def render_summary_tables(
+    summary_base: pd.DataFrame,
+    dataset: str,
+) -> tuple[str, str, str]:
+    correctness_table = correctness_summary_table(summary_base)
+    confidence_table = confidence_summary_table(summary_base)
+    answer_table = answer_summary_table(summary_base, dataset)
+
+    st.subheader("Summary tables")
+    st.caption("Tables summarize the selected model/dataset before detailed sidebar filters are applied.")
+    if "summary_table_reset_token" not in st.session_state:
+        st.session_state["summary_table_reset_token"] = 0
+    if st.button("Clear summary table selections"):
+        st.session_state["summary_table_reset_token"] += 1
+    reset_token = st.session_state["summary_table_reset_token"]
+
+    correctness_filter = ANY_CHOICE
+    confidence_filter = ANY_CHOICE
+    answer_filter = ANY_CHOICE
+    tab_correctness, tab_confidence, tab_answers = st.tabs(
+        ["Correctness transitions", "Confidence transitions", "Answer transitions"]
+    )
+
+    with tab_correctness:
+        state = st.dataframe(
+            correctness_table,
+            hide_index=True,
+            use_container_width=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key=f"correctness_summary_{reset_token}",
+        )
+        clicked = _selected_table_value(state, correctness_table, "correctness_pattern")
+        dropdown = st.selectbox(
+            "Filter sample list by correctness transition",
+            [ANY_CHOICE] + correctness_table["correctness_pattern"].tolist(),
+            key="correctness_summary_dropdown",
+        )
+        correctness_filter = clicked if clicked != ANY_CHOICE else dropdown
+
+    with tab_confidence:
+        state = st.dataframe(
+            confidence_table,
+            hide_index=True,
+            use_container_width=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key=f"confidence_summary_{reset_token}",
+        )
+        clicked = _selected_table_value(state, confidence_table, "confidence_transition")
+        dropdown = st.selectbox(
+            "Filter sample list by confidence transition",
+            [ANY_CHOICE] + confidence_table["confidence_transition"].tolist(),
+            key="confidence_summary_dropdown",
+        )
+        confidence_filter = clicked if clicked != ANY_CHOICE else dropdown
+
+    with tab_answers:
+        state = st.dataframe(
+            answer_table,
+            hide_index=True,
+            use_container_width=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key=f"answer_summary_{reset_token}",
+        )
+        clicked = _selected_table_value(state, answer_table, "answer_transition")
+        dropdown = st.selectbox(
+            "Filter sample list by answer transition",
+            [ANY_CHOICE] + answer_table["answer_transition"].tolist(),
+            key="answer_summary_dropdown",
+        )
+        answer_filter = clicked if clicked != ANY_CHOICE else dropdown
+
+    return correctness_filter, confidence_filter, answer_filter
 
 
 PANEL_FONT_REGULAR = Path("/usr/share/fonts/urw-base35/URWBookman-Light.otf")
@@ -169,10 +480,30 @@ THREE_PANEL_CSS = "<style>" + _font_face_css() + """
     align-items: center;
     justify-content: center;
     margin-bottom: 14px;
+    position: relative;
 }
 .qv-image-box img {
     max-width: 100%;
     max-height: 250px;
+    object-fit: contain;
+}
+.qv-inset {
+    position: absolute;
+    right: 8px;
+    bottom: 8px;
+    width: 34%;
+    max-width: 118px;
+    min-width: 82px;
+    padding: 4px;
+    border: 1px solid #f59e0b;
+    background: #ffffff;
+    box-shadow: 0 4px 12px rgba(17, 24, 39, 0.18);
+    box-sizing: border-box;
+}
+.qv-inset img {
+    display: block;
+    width: 100%;
+    max-height: 105px;
     object-fit: contain;
 }
 .qv-image-missing {
@@ -273,10 +604,8 @@ def _token_piece(token: dict[str, Any]) -> str:
 
 
 def _visible_bracket_text(piece: str, token: dict[str, Any]) -> str:
-    if piece == "\n":
-        return r"\n"
-    if piece == "\t":
-        return r"\t"
+    if piece and all(ch in "\n\r\t" for ch in piece):
+        return "".join({"\n": r"\n", "\r": r"\r", "\t": r"\t"}[ch] for ch in piece)
     if piece.strip():
         return piece
     display = str(token.get("display", token.get("token", "")))
@@ -356,6 +685,51 @@ def _answer_line(answer: Any, confidence: Any) -> str:
     return f"Answer: {format_answer_with_conf(answer, confidence)}"
 
 
+def _fmt_prob(value: Any) -> str:
+    try:
+        numeric = float(value)
+        if math.isnan(numeric):
+            return "NA"
+        return f"{numeric:.2f}"
+    except Exception:
+        return "NA"
+
+
+def _fmt_metric(value: Any) -> str:
+    try:
+        numeric = float(value)
+        if math.isnan(numeric):
+            return "NA"
+        return f"{numeric:.3f}"
+    except Exception:
+        return "NA"
+
+
+def _answers_match_for_row(row: pd.Series, left: Any, right: Any) -> bool:
+    if str(row.get("dataset", "")) == "pope":
+        return data_utils_module.pope_answer_bucket(left) == data_utils_module.pope_answer_bucket(right)
+    return data_utils_module.norm_answer(left) == data_utils_module.norm_answer(right)
+
+
+def _corrupted_answer_text(row: pd.Series) -> str:
+    lines = [_answer_line(row["degraded_answer"], row["degraded_confidence"])]
+    clean_answer_probability = row.get("corrupted_clean_answer_probability")
+    try:
+        has_clean_answer_probability = not math.isnan(float(clean_answer_probability))
+    except Exception:
+        has_clean_answer_probability = False
+    if (
+        has_clean_answer_probability
+        and not _answers_match_for_row(row, row["degraded_answer"], row["clean_answer"])
+    ):
+        lines.append(
+            "Clean answer: "
+            f"{data_utils_module.stripped_answer(row['clean_answer'])} "
+            f"(P(a_clean)={_fmt_prob(clean_answer_probability)})"
+        )
+    return "\n".join(lines)
+
+
 def _patch_activation_label(row: pd.Series) -> str:
     span = SPAN_DISPLAY.get(str(row["span_label"]), str(row["span_label"]))
     return f"{span}, token position {int(row['patched_token_position'])}"
@@ -367,21 +741,31 @@ def _panel_html(
     prompt_html: str,
     answer_text: str,
     fallback: str,
+    inset_image_source: str | Path | Image.Image | None = None,
+    inset_fallback: str = "Clean image inset unavailable",
 ) -> str:
+    inset_html = ""
+    if inset_image_source is not None:
+        inset_html = f"<div class='qv-inset'>{_image_html(inset_image_source, inset_fallback)}</div>"
     return (
         "<section class='qv-panel'>"
         f"<div class='qv-panel-title'>{html.escape(title)}</div>"
-        f"<div class='qv-image-box'>{_image_html(image_source, fallback)}</div>"
+        f"<div class='qv-image-box'>{_image_html(image_source, fallback)}{inset_html}</div>"
         f"<div class='qv-prompt'>{prompt_html}</div>"
-        f"<div class='qv-answer'>{html.escape(answer_text)}</div>"
+        f"<div class='qv-answer'>{html.escape(answer_text).replace(chr(10), '<br>')}</div>"
         "</section>"
     )
 
 
-def _selected_run_images(row: pd.Series, record: dict) -> tuple[str, str, str | Image.Image | None]:
+def _selected_run_images(
+    row: pd.Series,
+    record: dict,
+    show_clean_visual_inset: bool = False,
+) -> tuple[str, str, str | Image.Image | None, Image.Image | None]:
     clean_path = str(record.get("clean_image_path", ""))
     degraded_path = blurred_image_path(record, str(row["severity"]))
     patched_image: str | Image.Image | None = degraded_path
+    clean_marker_inset: Image.Image | None = None
 
     if str(row["span_label"]) == "visual":
         patched_pos = int(row["patched_token_position"])
@@ -398,7 +782,17 @@ def _selected_run_images(row: pd.Series, record: dict) -> tuple[str, str, str | 
         )
         if highlighted is not None:
             patched_image = highlighted
-    return clean_path, degraded_path, patched_image
+        if show_clean_visual_inset:
+            clean_marker, _, _ = highlighted_clean_marker_image(
+                str(row["model"]),
+                clean_path,
+                visual_rel,
+                visual_token_count,
+                row.get("visual_geometry"),
+                max_side=900,
+            )
+            clean_marker_inset = clean_marker
+    return clean_path, degraded_path, patched_image, clean_marker_inset
 
 
 def show_three_panel_layout(
@@ -406,10 +800,15 @@ def show_three_panel_layout(
     record: dict,
     token_rows: list[dict[str, Any]],
     notes: list[str],
+    show_clean_visual_inset: bool = False,
 ) -> None:
     patched_pos = int(row["patched_token_position"])
     span_label = str(row["span_label"])
-    clean_path, degraded_path, patched_image = _selected_run_images(row, record)
+    clean_path, degraded_path, patched_image, clean_marker_inset = _selected_run_images(
+        row,
+        record,
+        show_clean_visual_inset=show_clean_visual_inset,
+    )
 
     prompt_html = _prompt_html_from_tokens(token_rows, patched_pos, highlight_patched_text=False)
     patched_prompt_html = _prompt_html_from_tokens(
@@ -434,7 +833,7 @@ def show_three_panel_layout(
             "(2) Corrupted Run",
             degraded_path,
             prompt_html,
-            _answer_line(row["degraded_answer"], row["degraded_confidence"]),
+            _corrupted_answer_text(row),
             "Corrupted image unavailable",
         ),
         _panel_html(
@@ -443,6 +842,8 @@ def show_three_panel_layout(
             patched_prompt_html,
             _answer_line(row["patched_answer"], row["patched_confidence"]),
             "Patched image unavailable",
+            inset_image_source=clean_marker_inset,
+            inset_fallback="Clean image with patched visual-token marker unavailable",
         ),
     ]
     st.html(
@@ -577,8 +978,10 @@ def _draw_export_panel(
     prompt_segments: list[tuple[str, bool]],
     answer: str,
     line_count: int,
+    inset_image_source: str | Path | Image.Image | None = None,
 ) -> None:
     body_font, title_font = _export_font_properties()
+    answer_lines = str(answer).splitlines() or [""]
     prompt_size = 11 if line_count <= 9 else max(7.0, 11 - 0.35 * (line_count - 9))
     prompt_top = 0.48
     axis_height_inches = max(1.0, ax.figure.get_figheight() * 0.90)
@@ -588,7 +991,7 @@ def _draw_export_panel(
     divider_y = max(0.105, prompt_bottom - divider_gap)
     answer_y = divider_y - min(0.030, line_step * 1.1)
     answer_line_step = (12 / 72.0 / axis_height_inches) * 1.25
-    content_bottom = max(0.035, answer_y - answer_line_step - 0.025)
+    content_bottom = max(0.035, answer_y - answer_line_step * len(answer_lines) - 0.025)
 
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
@@ -632,6 +1035,18 @@ def _draw_export_panel(
     else:
         image_ax.imshow(image)
 
+    inset_image = _load_export_image(inset_image_source)
+    if inset_image is not None:
+        inset_ax = ax.inset_axes([0.64, 0.555, 0.23, 0.15])
+        inset_ax.set_facecolor("white")
+        for spine in inset_ax.spines.values():
+            spine.set_visible(True)
+            spine.set_linewidth(1.1)
+            spine.set_edgecolor("#f59e0b")
+        inset_ax.set_xticks([])
+        inset_ax.set_yticks([])
+        inset_ax.imshow(inset_image)
+
     renderer = ax.figure.canvas.get_renderer()
     y = prompt_top
     for line in _wrap_segments_for_export(prompt_segments):
@@ -667,16 +1082,17 @@ def _draw_export_panel(
         transform=ax.transAxes,
         clip_on=False,
     )
-    ax.text(
-        0.075,
-        answer_y,
-        answer,
-        ha="left",
-        va="top",
-        fontsize=12,
-        fontproperties=body_font,
-        transform=ax.transAxes,
-    )
+    for line_idx, answer_line in enumerate(answer_lines):
+        ax.text(
+            0.075,
+            answer_y - answer_line_step * line_idx,
+            answer_line,
+            ha="left",
+            va="top",
+            fontsize=12,
+            fontproperties=body_font,
+            transform=ax.transAxes,
+        )
 
 
 def _safe_export_stem(row: pd.Series) -> str:
@@ -692,10 +1108,15 @@ def render_three_panel_export(
     record: dict,
     token_rows: list[dict[str, Any]],
     file_format: str,
+    show_clean_visual_inset: bool = False,
 ) -> bytes:
     patched_pos = int(row["patched_token_position"])
     span_label = str(row["span_label"])
-    clean_path, degraded_path, patched_image = _selected_run_images(row, record)
+    clean_path, degraded_path, patched_image, clean_marker_inset = _selected_run_images(
+        row,
+        record,
+        show_clean_visual_inset=show_clean_visual_inset,
+    )
 
     prompt_segments = _prompt_segments_for_export(token_rows, patched_pos, mark_patched_text=False)
     patched_prompt_segments = _prompt_segments_for_export(
@@ -713,18 +1134,33 @@ def render_three_panel_export(
         for i in range(3)
     ]
     panels = [
-        ("(1) Clean Run", clean_path, prompt_segments, _answer_line(row["clean_answer"], row["clean_confidence"])),
-        ("(2) Corrupted Run", degraded_path, prompt_segments, _answer_line(row["degraded_answer"], row["degraded_confidence"])),
+        ("(1) Clean Run", clean_path, prompt_segments, _answer_line(row["clean_answer"], row["clean_confidence"]), None),
+        (
+            "(2) Corrupted Run",
+            degraded_path,
+            prompt_segments,
+            _corrupted_answer_text(row),
+            None,
+        ),
         (
             "(3) Patched Run",
             patched_image,
             patched_prompt_segments,
             _answer_line(row["patched_answer"], row["patched_confidence"]),
+            clean_marker_inset,
         ),
     ]
-    for ax, (title, image_source, prompt_segments_for_panel, answer_text) in zip(axes, panels):
+    for ax, (title, image_source, prompt_segments_for_panel, answer_text, inset_image_source) in zip(axes, panels):
         line_count = len(_wrap_segments_for_export(prompt_segments_for_panel))
-        _draw_export_panel(ax, title, image_source, prompt_segments_for_panel, answer_text, line_count)
+        _draw_export_panel(
+            ax,
+            title,
+            image_source,
+            prompt_segments_for_panel,
+            answer_text,
+            line_count,
+            inset_image_source=inset_image_source,
+        )
 
     buffer = BytesIO()
     save_kwargs = {"bbox_inches": "tight", "pad_inches": 0.03, "facecolor": "white"}
@@ -739,10 +1175,27 @@ def render_three_panel_export(
     return buffer.getvalue()
 
 
-def show_three_panel_downloads(row: pd.Series, record: dict, token_rows: list[dict[str, Any]]) -> None:
+def show_three_panel_downloads(
+    row: pd.Series,
+    record: dict,
+    token_rows: list[dict[str, Any]],
+    show_clean_visual_inset: bool = False,
+) -> None:
     stem = _safe_export_stem(row)
-    pdf_bytes = render_three_panel_export(row, record, token_rows, "pdf")
-    png_bytes = render_three_panel_export(row, record, token_rows, "png")
+    pdf_bytes = render_three_panel_export(
+        row,
+        record,
+        token_rows,
+        "pdf",
+        show_clean_visual_inset=show_clean_visual_inset,
+    )
+    png_bytes = render_three_panel_export(
+        row,
+        record,
+        token_rows,
+        "png",
+        show_clean_visual_inset=show_clean_visual_inset,
+    )
     left, right = st.columns(2)
     left.download_button(
         "Download three-panel PDF",
@@ -780,80 +1233,150 @@ def show_original_layout(
     with right:
         st.subheader("Ground truth")
         st.write(ground_truth_text(record, str(row["dataset"])))
-        st.caption("Correctness values are the dataset-specific scores stored in the positional-sweep parquet.")
+        st.caption("Correctness values are the dataset-specific scores stored in the selected sweep parquet.")
 
 
 def main() -> None:
-    st.title("Qualitative positional-patching viewer")
-    rows = load_rows()
-    if rows.empty:
-        st.error("No positional-sweep rows could be loaded.")
+    st.title("Qualitative activation-patching viewer")
+    if st.sidebar.button("Reload data", use_container_width=True):
+        clear_app_caches()
+        st.rerun()
+
+    st.sidebar.header("Results")
+    sweep_type = st.sidebar.radio(
+        "Sweep",
+        ["Positional sweep", "Layer sweep"],
+        help=(
+            "Layer sweep loads the parquets used for "
+            "two_metrics_layer_sweep_nofilter and keeps position_offset == -1."
+        ),
+    )
+
+    raw_rows = load_rows(sweep_type)
+    if raw_rows.empty:
+        st.error(f"No {sweep_type.lower()} rows could be loaded.")
         return
 
     st.sidebar.header("Filters")
-    preset = st.sidebar.selectbox(
-        "Preset",
-        [
-            "None",
-            "Final prompt token restores answer",
-            "Visual token restores answer",
-            "Confidence recovers, accuracy does not",
-            "Accuracy recovers, confidence does not",
-            "Confidence exceeds clean",
-            "Patching changes answer",
-            "Top 20 by accuracy recovery",
-            "Top 20 by confidence recovery",
-        ],
+    models = st.sidebar.multiselect(
+        "Model",
+        sorted(raw_rows["model"].unique()),
+        default=sorted(raw_rows["model"].unique()),
     )
-
-    filtered = rows.copy()
-    models = st.sidebar.multiselect("Model", sorted(rows["model"].unique()), default=sorted(rows["model"].unique()))
     datasets = st.sidebar.multiselect(
         "Dataset",
-        sorted(rows["dataset"].unique()),
-        default=sorted(rows["dataset"].unique()),
+        sorted(raw_rows["dataset"].unique()),
+        default=sorted(raw_rows["dataset"].unique()),
         format_func=lambda x: DATASET_LABELS.get(x, x),
     )
-    spans = st.sidebar.multiselect(
-        "Patched token span",
-        sorted(rows["span_label"].dropna().unique()),
-        default=sorted(rows["span_label"].dropna().unique()),
-        format_func=lambda x: SPAN_DISPLAY.get(x, x),
-    )
-    filtered = filtered[
-        filtered["model"].isin(models)
-        & filtered["dataset"].isin(datasets)
-        & filtered["span_label"].isin(spans)
-    ]
-
+    if sweep_type == "Layer sweep":
+        available_layers = sorted(raw_rows["patch_layer"].dropna().astype(int).unique())
+        selected_layers = st.sidebar.multiselect(
+            "Layer",
+            available_layers,
+            default=available_layers,
+            format_func=lambda layer: f"Layer {int(layer)}",
+        )
+        spans = []
+    else:
+        spans = st.sidebar.multiselect(
+            "Patched token span",
+            sorted(raw_rows["span_label"].dropna().unique()),
+            default=sorted(raw_rows["span_label"].dropna().unique()),
+            format_func=lambda x: SPAN_DISPLAY.get(x, x),
+        )
+        selected_layers = []
     sample_filter = st.sidebar.text_input("Sample id contains", "")
+
+    st.sidebar.subheader("Correctness")
+    clean_correctness_choice = st.sidebar.selectbox(
+        "Clean run", [ANY_CHOICE, "Correct", "Incorrect"], key="clean_correctness_filter"
+    )
+    corrupted_correctness_choice = st.sidebar.selectbox(
+        "Corrupted run", [ANY_CHOICE, "Correct", "Incorrect"], key="corrupted_correctness_filter"
+    )
+    patched_correctness_choice = st.sidebar.selectbox(
+        "Patched run", [ANY_CHOICE, "Correct", "Incorrect"], key="patched_correctness_filter"
+    )
+
+    st.sidebar.subheader("Confidence")
+    confidence_tolerance = st.sidebar.slider(
+        "Unchanged tolerance",
+        min_value=0.0,
+        max_value=0.20,
+        value=0.02,
+        step=0.005,
+        format="%.3f",
+        key="confidence_unchanged_tolerance",
+    )
+    corruption_direction_choice = st.sidebar.selectbox(
+        "Corrupted run",
+        [ANY_CHOICE, "Increased", "Decreased", "Unchanged"],
+        help="Corrupted confidence relative to the clean run.",
+        key="corrupted_confidence_direction_filter",
+    )
+    patch_direction_choice = st.sidebar.selectbox(
+        "Patched run",
+        [ANY_CHOICE, "Increased", "Decreased", "Unchanged"],
+        help="Patched confidence relative to the corrupted run.",
+        key="patched_confidence_direction_filter",
+    )
+
+    st.sidebar.subheader("Display")
+    sort_options = {
+        "Accuracy recovery": "accuracy_recovery",
+        "Confidence recovery": "confidence_recovery",
+        "Absolute confidence change after patching": "abs_delta_conf_patch",
+        "Patched correctness": "patched_correctness",
+        "Patched confidence": "patched_confidence",
+    }
+    sort_label = st.sidebar.selectbox("Sort sample list", list(sort_options.keys()))
+    sort_order = st.sidebar.selectbox("Order", ["Highest first", "Lowest first"])
+    top_k = st.sidebar.number_input("Show top k rows", min_value=1, max_value=5000, value=200, step=10)
+    sample_layout = st.sidebar.radio("Selected sample layout", ["Three-panel", "Original"], index=0)
+    if sweep_type == "Positional sweep":
+        show_clean_visual_inset = st.sidebar.checkbox(
+            "Clean inset for visual patches",
+            value=True,
+            help="In the patched panel, show a small clean-image inset with the visual-token marker.",
+        )
+    else:
+        show_clean_visual_inset = False
+
+    rows = add_confidence_direction_columns(raw_rows, confidence_tolerance)
+    filtered = rows[
+        rows["model"].isin(models)
+        & rows["dataset"].isin(datasets)
+    ]
+    if sweep_type == "Layer sweep":
+        filtered = filtered[filtered["patch_layer"].isin(selected_layers)]
+    else:
+        filtered = filtered[filtered["span_label"].isin(spans)]
     if sample_filter:
         filtered = filtered[filtered["sample_id"].astype(str).str.contains(sample_filter, case=False, regex=False)]
 
-    pos_min = int(math.floor(rows["patched_token_position"].min()))
-    pos_max = int(math.ceil(rows["patched_token_position"].max()))
-    pos_range = st.sidebar.slider("Patched token position", pos_min, pos_max, (pos_min, pos_max))
-    filtered = filtered[
-        (filtered["patched_token_position"] >= pos_range[0])
-        & (filtered["patched_token_position"] <= pos_range[1])
-    ]
+    filtered = _apply_correctness_choice(filtered, "clean_correct", clean_correctness_choice)
+    filtered = _apply_correctness_choice(filtered, "corrupted_correct", corrupted_correctness_choice)
+    filtered = _apply_correctness_choice(filtered, "patched_correct", patched_correctness_choice)
 
-    filtered = filter_tri_state(filtered, "Answer changed", "answer_changed")
-    filtered = filter_tri_state(filtered, "Correctness improved", "correctness_improved")
-    filtered = filter_tri_state(filtered, "Confidence improved", "confidence_improved")
-
-    sort_metric = st.sidebar.selectbox(
-        "Sort",
-        ["accuracy_recovery", "confidence_recovery", "patched_correctness", "patched_confidence"],
+    filtered = _apply_direction_choice(
+        filtered,
+        "corruption_confidence_direction",
+        corruption_direction_choice,
     )
-    top_k = st.sidebar.number_input("Show top k rows", min_value=1, max_value=5000, value=200, step=10)
-    sample_layout = st.sidebar.radio("Selected sample layout", ["Three-panel", "Original"], index=0)
-    filtered = apply_preset(filtered, preset).sort_values(sort_metric, ascending=False).head(int(top_k))
+    filtered = _apply_direction_choice(filtered, "patch_confidence_direction", patch_direction_choice)
 
-    st.caption(
-        f"Loaded {len(rows):,} plot-included patched rows from the exact positional-sweep parquets. "
-        f"Showing {len(filtered):,} rows after filters."
-    )
+    sort_metric = sort_options[sort_label]
+    filtered = filtered.sort_values(sort_metric, ascending=(sort_order == "Lowest first")).head(int(top_k))
+
+    if sweep_type == "Layer sweep":
+        source_caption = (
+            "final-prompt-token patched rows from the exact layer-sweep parquets used for "
+            "two_metrics_layer_sweep_nofilter"
+        )
+    else:
+        source_caption = "plot-included patched rows from the exact positional-sweep parquets"
+    st.caption(f"Loaded {len(rows):,} {source_caption}. Showing {len(filtered):,} rows after filters.")
 
     if filtered.empty:
         st.warning("No rows match the current filters.")
@@ -863,30 +1386,55 @@ def main() -> None:
         "model",
         "dataset",
         "sample_id",
-        "span_label",
+        "span_display",
+        "patch_layer_display",
         "patched_token_position",
         "clean_answer_stripped",
-        "degraded_answer_stripped",
+        "corrupted_answer_stripped",
         "patched_answer_stripped",
-        "clean_correctness",
-        "degraded_correctness",
-        "patched_correctness",
+        "clean_correctness_label",
+        "corrupted_correctness_label",
+        "patched_correctness_label",
+        "correctness_pattern",
+        "delta_conf_corruption",
+        "delta_conf_patch",
+        "confidence_transition",
         "accuracy_recovery",
         "confidence_recovery",
-        "answer_changed",
     ]
-    st.dataframe(filtered[table_cols], hide_index=True, use_container_width=True, height=260)
+    sample_table = filtered[table_cols].rename(
+        columns={
+            "span_display": "span",
+            "patch_layer_display": "patch layer",
+            "patched_token_position": "token position",
+            "clean_answer_stripped": "clean answer",
+            "corrupted_answer_stripped": "corrupted answer",
+            "patched_answer_stripped": "patched answer",
+            "clean_correctness_label": "clean correctness",
+            "corrupted_correctness_label": "corrupted correctness",
+            "patched_correctness_label": "patched correctness",
+            "delta_conf_corruption": "delta corrupted-clean confidence",
+            "delta_conf_patch": "delta patched-corrupted confidence",
+        }
+    )
+    st.dataframe(sample_table, hide_index=True, use_container_width=True, height=300)
 
     selected_id = st.selectbox("Selected patch", filtered["row_id"].tolist())
     row = filtered[filtered["row_id"] == selected_id].iloc[0]
     record = sample_record(str(row["model"]), str(row["dataset"]), str(row["sample_id"]))
 
     st.subheader(f"{row['model']} / {DATASET_LABELS.get(row['dataset'], row['dataset'])} / sample {row['sample_id']}")
-    st.write(
-        f"Patched activation: **{SPAN_DISPLAY.get(row['span_label'], row['span_label'])}**, "
-        f"token position **{int(row['patched_token_position'])}** "
-        f"(span-relative {int(row['span_rel_pos'])})."
-    )
+    if sweep_type == "Layer sweep":
+        st.write(
+            f"Patched activation: final prompt token position **{int(row['patched_token_position'])}** "
+            f"at hidden-state layer **{int(row['patch_layer'])}**."
+        )
+    else:
+        st.write(
+            f"Patched activation: **{SPAN_DISPLAY.get(row['span_label'], row['span_label'])}**, "
+            f"token position **{int(row['patched_token_position'])}** "
+            f"(span-relative {int(row['span_rel_pos'])})."
+        )
 
     token_rows, spans, notes = prompt_tokens_for_row(rows, row)
     if spans:
@@ -896,12 +1444,23 @@ def main() -> None:
                 row[key] = spans[key]
 
     if sample_layout == "Three-panel":
-        show_three_panel_layout(row, record, token_rows, notes)
+        show_three_panel_layout(
+            row,
+            record,
+            token_rows,
+            notes,
+            show_clean_visual_inset=show_clean_visual_inset,
+        )
         st.subheader("Export three-panel figure")
-        show_three_panel_downloads(row, record, token_rows)
+        show_three_panel_downloads(
+            row,
+            record,
+            token_rows,
+            show_clean_visual_inset=show_clean_visual_inset,
+        )
         st.subheader("Ground truth")
         st.write(ground_truth_text(record, str(row["dataset"])))
-        st.caption("Correctness values are the dataset-specific scores stored in the positional-sweep parquet.")
+        st.caption("Correctness values are the dataset-specific scores stored in the selected sweep parquet.")
     else:
         show_original_layout(row, record, token_rows, notes)
 
@@ -913,6 +1472,10 @@ def main() -> None:
                 {
                     "accuracy recovery": f"{metric_row['accuracy_recovery']:.3f}",
                     "confidence recovery": f"{metric_row['confidence_recovery']:.3f}",
+                    "clean-answer confidence recovery": (
+                        _fmt_metric(metric_row["clean_answer_confidence_recovery"])
+                    ),
+                    "patch layer": str(metric_row["patch_layer"]),
                     "clean correctness": f"{metric_row['clean_correctness']:.3f}",
                     "degraded correctness": f"{metric_row['degraded_correctness']:.3f}",
                     "patched correctness": f"{metric_row['patched_correctness']:.3f}",

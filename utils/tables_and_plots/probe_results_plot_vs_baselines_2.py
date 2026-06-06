@@ -83,17 +83,17 @@ DATASET_CONFIGS = {
 OUTDIR = Path("probe_results/_plots/brier_grouped_clean")
 
 DISPLAY_NAMES = {
-    "llava/coco-qa-vi": "LLaVA / COCO-QA-VI",
+    "llava/coco-qa-vi": "LLaVA / COCO-QA",
     "llava/imagenet-r": "LLaVA / ImageNet-R",
     "llava/vqa-v2": "LLaVA / VQA-v2",
     "llava/vqa-v2-hard-exact": "LLaVA / VQA-v2 (hard)",
-    "llava/pope/random": "LLaVA / POPE Random",
+    "llava/pope/random": "LLaVA / POPE",
     "llava/pope/adversarial": "LLaVA / POPE Adversarial",
     "llava/msts": "LLaVA / MSTS",
-    "qwen/coco-qa-vi": "Qwen / COCO-QA-VI",
+    "qwen/coco-qa-vi": "Qwen / COCO-QA",
     "qwen/imagenet-r": "Qwen / ImageNet-R",
     "qwen/vqa-v2": "Qwen / VQA-v2",
-    "qwen/pope/random": "Qwen / POPE Random",
+    "qwen/pope/random": "Qwen / POPE",
     "qwen/pope/adversarial": "Qwen / POPE Adversarial",
 }
 
@@ -1096,8 +1096,8 @@ def plot_model_comparison_component_comparison_mlp(dfs: dict[str, pd.DataFrame])
     probe_type = "mlp"
     columns = [
         ("vqa-v2", "VQA-v2"),
-        ("coco-qa-vi", "COCO-QA-VI"),
-        ("pope/random", "POPE Random"),
+        ("coco-qa-vi", "COCO-QA"),
+        ("pope/random", "POPE"),
         ("imagenet-r", "ImageNet-R"),
     ]
     rows = [("llava", "LLaVA"), ("qwen", "Qwen")]
@@ -1189,6 +1189,301 @@ def plot_model_comparison_component_comparison_mlp(dfs: dict[str, pd.DataFrame])
     fig.savefig(outpath.with_suffix(".png"), format="png", bbox_inches="tight", dpi=300)
     plt.close(fig)
     print(f"[saved] {outpath} (+ png)")
+
+
+def plot_model_comparison_component_comparison_linear_vs_mlp(
+    dfs: dict[str, pd.DataFrame],
+    columns: list[tuple[str, str]],
+    filename_suffix: str,
+    title: Optional[str] = None,
+) -> None:
+    selected_features = {
+        'vision_mean_layer_-1': 'Vision (mean)',
+        'lm_visual_mean_layer_-1': 'Lm Visual (mean)',
+        'lm_question_lasttok_layer_-1': 'LM Question (lasttok)',
+        'lm_fullspan_lasttok_layer_-1': 'LM Final Token',
+        'lm_answer_lasttok_layer_-1': 'LM Answer (lasttok)',
+        'answer_gen_entropy_mean': 'Entropy (mean)',
+        'answer_gen_neglogp_mean': 'NegLogP (mean)',
+    }
+    components = list(selected_features.values())
+    probe_specs = [
+        ("linear", "Linear", "C0"),
+        ("mlp", "Non-linear (MLP)", "C1"),
+    ]
+    rows = [("llava", "LLaVA"), ("qwen", "Qwen")]
+
+    fig_width = 8 * len(columns)
+    fig, axes = plt.subplots(len(rows), len(columns), figsize=(fig_width, 10), sharex=True, sharey=True)
+
+    for row_idx, (model, model_label) in enumerate(rows):
+        for col_idx, (dataset_suffix, dataset_label) in enumerate(columns):
+            ax = axes[row_idx, col_idx]
+            dataset = f"{model}/{dataset_suffix}"
+            df = dfs.get(dataset)
+
+            if row_idx == 0:
+                ax.set_title(dataset_label, fontsize=AX_TITLE_FONTSIZE, fontweight="bold")
+
+            if df is None:
+                ax.text(0.5, 0.5, "Data not available", ha="center", va="center")
+                ax.set_axis_off()
+                continue
+
+            subset = df[df["feature_label"].isin(selected_features.keys())].copy()
+            if subset.empty:
+                ax.text(0.5, 0.5, "Data not available", ha="center", va="center")
+                ax.set_axis_off()
+                continue
+
+            subset["Component"] = subset["feature_label"].map(selected_features)
+            subset_sorted = subset.set_index("Component").reindex(components)
+            has_probe = subset_sorted[[f"{probe_type}_true" for probe_type, _, _ in probe_specs]].notna().any(axis=1)
+            subset_sorted = subset_sorted[has_probe]
+            current_components = subset_sorted.index.tolist()
+
+            if subset_sorted.empty:
+                ax.text(0.5, 0.5, "Data not available", ha="center", va="center")
+                ax.set_axis_off()
+                continue
+
+            no_skill = get_no_skill_brier(dataset)
+            if np.isfinite(no_skill):
+                ax.axhspan(0, no_skill, alpha=0.06, color="gray")
+                ax.axhline(no_skill, linestyle="--", linewidth=2, color="black", label="No-skill baseline")
+
+            x = np.arange(len(current_components))
+            width = 0.8 / len(probe_specs)
+
+            for probe_idx, (probe_type, probe_label, color) in enumerate(probe_specs):
+                offset = (probe_idx - len(probe_specs) / 2 + 0.5) * width
+                y_true = subset_sorted[f"{probe_type}_true"].to_numpy(dtype=float)
+                y_shuf = subset_sorted[f"{probe_type}_shuffle"].to_numpy(dtype=float)
+                y_extra = y_shuf - y_true
+
+                ax.bar(
+                    x + offset,
+                    y_true,
+                    width,
+                    color=color,
+                    edgecolor="black",
+                    label=probe_label,
+                )
+                if np.isfinite(y_extra).any():
+                    ax.bar(
+                        x + offset,
+                        y_extra,
+                        width,
+                        bottom=y_true,
+                        hatch="//",
+                        alpha=0.6,
+                        color=color,
+                        edgecolor="black",
+                        label="Shuffled-label control" if probe_idx == 0 else "",
+                    )
+
+            ax.set_xticks(x)
+            ax.set_xticklabels(current_components, rotation=45, ha="right", fontsize=TICK_LABEL_FONTSIZE)
+            ax.tick_params(axis="y", labelsize=TICK_LABEL_FONTSIZE)
+            ax.set_ylim(0.00, 0.45)
+            ax.set_yticks(np.arange(0.00, 0.46, 0.05))
+            ax.grid(axis="y", linestyle="--", alpha=0.6)
+
+            if col_idx == 0:
+                ax.set_ylabel(f"{model_label}\nBrier Score", fontsize=AX_LABEL_FONTSIZE)
+
+            if row_idx == 0:
+                ax.tick_params(axis="x", labelbottom=False)
+
+    handles, labels = [], []
+    for ax in axes.ravel():
+        ax_handles, ax_labels = ax.get_legend_handles_labels()
+        handles.extend(ax_handles)
+        labels.extend(ax_labels)
+    by_label = dict(zip(labels, handles))
+    fig.legend(
+        by_label.values(),
+        by_label.keys(),
+        loc="upper center",
+        ncol=4,
+        bbox_to_anchor=(0.5, 0.955),
+        fontsize=LEGEND_FONTSIZE,
+    )
+
+    dataset_names = [dataset_label for _, dataset_label in columns]
+    if len(dataset_names) == 1:
+        dataset_title = dataset_names[0]
+    elif len(dataset_names) == 2:
+        dataset_title = f"{dataset_names[0]} & {dataset_names[1]}"
+    else:
+        dataset_title = f"{', '.join(dataset_names[:-1])} & {dataset_names[-1]}"
+    if title is None:
+        title = f"Linear vs. Non-Linear Probes - {dataset_title}"
+    plt.suptitle(title, fontsize=COMBINED_FIG_TITLE_FONTSIZE, y=1.03)
+    plt.tight_layout(rect=(0, 0, 1, 0.925))
+
+    outdir = OUTDIR / "all_models_all_datasets"
+    outdir.mkdir(parents=True, exist_ok=True)
+    outpath = outdir / f"model_comparison_component_comparison_linear_vs_mlp_{filename_suffix}.pdf"
+    fig.savefig(outpath, format="pdf", bbox_inches="tight")
+    fig.savefig(outpath.with_suffix(".png"), format="png", bbox_inches="tight", dpi=300)
+    plt.close(fig)
+    print(f"[saved] {outpath} (+ png)")
+
+
+def plot_model_comparison_aggregation_strategy_mlp(dfs: dict[str, pd.DataFrame]) -> None:
+    aggregation_features = {
+        "lm_visual": {
+            "label": "Lm Visual",
+            "Mean": "lm_visual_mean_layer_-1",
+            "Last Token": "lm_visual_lasttok_layer_-1",
+        },
+        "lm_question": {
+            "label": "LM Question",
+            "Mean": "lm_question_mean_layer_-1",
+            "Last Token": "lm_question_lasttok_layer_-1",
+        },
+        "lm_fullspan": {
+            "label": "LM Final Token",
+            "Mean": "lm_fullspan_mean_layer_-1",
+            "Last Token": "lm_fullspan_lasttok_layer_-1",
+        },
+        "lm_answer": {
+            "label": "LM Answer",
+            "Mean": "lm_answer_mean_layer_-1",
+            "Last Token": "lm_answer_lasttok_layer_-1",
+        },
+    }
+    components = [spec["label"] for spec in aggregation_features.values()]
+    groups = ["Mean", "Last Token"]
+    probe_type = "mlp"
+    columns = [
+        ("vqa-v2", "VQA-v2"),
+        ("coco-qa-vi", "COCO-QA"),
+        ("pope/random", "POPE"),
+        ("imagenet-r", "ImageNet-R"),
+    ]
+    rows = [("llava", "LLaVA"), ("qwen", "Qwen")]
+
+    fig, axes = plt.subplots(len(rows), len(columns), figsize=(28, 10), sharex=True, sharey=True)
+
+    for row_idx, (model, model_label) in enumerate(rows):
+        for col_idx, (dataset_suffix, dataset_label) in enumerate(columns):
+            ax = axes[row_idx, col_idx]
+            dataset = f"{model}/{dataset_suffix}"
+            df = dfs.get(dataset)
+
+            if row_idx == 0:
+                ax.set_title(dataset_label, fontsize=AX_TITLE_FONTSIZE, fontweight="bold")
+
+            if df is None:
+                ax.text(0.5, 0.5, "Data not available", ha="center", va="center")
+                ax.set_axis_off()
+                continue
+
+            no_skill = get_no_skill_brier(dataset)
+            if np.isfinite(no_skill):
+                ax.axhspan(0, no_skill, alpha=0.06, color="gray")
+                ax.axhline(no_skill, linestyle="--", linewidth=2, color="black", label="No-skill baseline")
+
+            x = np.arange(len(components))
+            width = 0.8 / len(groups)
+            any_data = False
+
+            for group_idx, group in enumerate(groups):
+                feature_by_component = {
+                    spec["label"]: spec[group]
+                    for spec in aggregation_features.values()
+                }
+                feature_rows = (
+                    df[df["feature_label"].isin(feature_by_component.values())]
+                    .drop_duplicates(subset=["feature_label"])
+                    .set_index("feature_label")
+                )
+
+                y_true = []
+                y_shuf = []
+                for component in components:
+                    feature_name = feature_by_component[component]
+                    if feature_name in feature_rows.index:
+                        y_true.append(feature_rows.loc[feature_name, f"{probe_type}_true"])
+                        y_shuf.append(feature_rows.loc[feature_name, f"{probe_type}_shuffle"])
+                    else:
+                        y_true.append(np.nan)
+                        y_shuf.append(np.nan)
+
+                y_true = np.array(y_true, dtype=float)
+                y_shuf = np.array(y_shuf, dtype=float)
+                y_extra = y_shuf - y_true
+                if np.isfinite(y_true).any():
+                    any_data = True
+
+                offset = (group_idx - len(groups) / 2 + 0.5) * width
+                bars = ax.bar(
+                    x + offset,
+                    y_true,
+                    width,
+                    edgecolor="black",
+                    label=group,
+                )
+                colors = [bar.get_facecolor() for bar in bars]
+                if np.isfinite(y_extra).any():
+                    ax.bar(
+                        x + offset,
+                        y_extra,
+                        width,
+                        bottom=y_true,
+                        hatch="//",
+                        alpha=0.6,
+                        color=colors,
+                        edgecolor="black",
+                        label="Shuffled-label control" if group_idx == 0 else "",
+                    )
+
+            if not any_data:
+                ax.text(0.5, 0.5, "Data not available", ha="center", va="center")
+                ax.set_axis_off()
+                continue
+
+            ax.set_xticks(x)
+            ax.set_xticklabels(components, rotation=45, ha="right", fontsize=TICK_LABEL_FONTSIZE)
+            ax.tick_params(axis="y", labelsize=TICK_LABEL_FONTSIZE)
+            ax.set_ylim(0.00, 0.45)
+            ax.set_yticks(np.arange(0.00, 0.46, 0.05))
+            ax.grid(axis="y", linestyle="--", alpha=0.6)
+
+            if col_idx == 0:
+                ax.set_ylabel(f"{model_label}\nBrier Score", fontsize=AX_LABEL_FONTSIZE)
+
+            if row_idx == 0:
+                ax.tick_params(axis="x", labelbottom=False)
+
+    handles, labels = [], []
+    for ax in axes.ravel():
+        ax_handles, ax_labels = ax.get_legend_handles_labels()
+        handles.extend(ax_handles)
+        labels.extend(ax_labels)
+    by_label = dict(zip(labels, handles))
+    fig.legend(
+        by_label.values(),
+        by_label.keys(),
+        loc="upper center",
+        ncol=4,
+        bbox_to_anchor=(0.5, 0.955),
+        fontsize=LEGEND_FONTSIZE,
+    )
+
+    plt.suptitle("Aggregation Strategy - MLP Probe", fontsize=COMBINED_FIG_TITLE_FONTSIZE, y=1.03)
+    plt.tight_layout(rect=(0, 0, 1, 0.925))
+
+    outdir = OUTDIR / "all_models_all_datasets"
+    outdir.mkdir(parents=True, exist_ok=True)
+    outpath = outdir / "model_comparison_aggregation_strategy_mlp.pdf"
+    fig.savefig(outpath, format="pdf", bbox_inches="tight")
+    fig.savefig(outpath.with_suffix(".png"), format="png", bbox_inches="tight", dpi=300)
+    plt.close(fig)
+    print(f"[saved] {outpath} (+ png)")
+
 
 def plot_vqa_soft_vs_hard_llava(
     dfs: dict[str, pd.DataFrame],
@@ -1372,6 +1667,28 @@ def main():
                         selected,
                     )
         plot_model_comparison_component_comparison_mlp(loaded_dfs)
+        plot_model_comparison_component_comparison_linear_vs_mlp(
+            loaded_dfs,
+            [("vqa-v2", "VQA-v2"), ("coco-qa-vi", "COCO-QA")],
+            "vqa_v2_coco_qa",
+        )
+        plot_model_comparison_component_comparison_linear_vs_mlp(
+            loaded_dfs,
+            [("pope/random", "POPE"), ("imagenet-r", "ImageNet-R")],
+            "pope_imagenet_r",
+        )
+        plot_model_comparison_component_comparison_linear_vs_mlp(
+            loaded_dfs,
+            [
+                ("vqa-v2", "VQA-v2"),
+                ("coco-qa-vi", "COCO-QA"),
+                ("pope/random", "POPE"),
+                ("imagenet-r", "ImageNet-R"),
+            ],
+            "all_four_datasets",
+            title="Linear vs Non Linear Probes",
+        )
+        plot_model_comparison_aggregation_strategy_mlp(loaded_dfs)
 
 if __name__ == "__main__":
     main()

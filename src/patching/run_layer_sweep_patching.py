@@ -35,10 +35,14 @@ from src.patching.collect_activations import (
     _score_prediction,
 )
 from src.patching.run_patching import (
+    _compute_clean_answer_probability_stats,
     _compute_output_stats,
+    _compute_pope_answer_probability_stats,
+    _compute_stripped_answer_softmax_stats,
     _get_decoder_layers,
     _patched_generate,
     _run_baseline_forward,
+    _stripped_answer_token_ids,
 )
 from src.uq_dataset_generation.token_spans import build_token_spans
 from src.vlm import VLMAdapter, prepare_inputs, prepare_qwen_fused_inputs_embeds
@@ -71,6 +75,11 @@ class LayerSweepConfig:
     # Qwen-only: append an empty ``<think></think>`` block to the prompt so
     # generated step 0 is the first answer token.
     qwen_prefill_empty_thinking: bool = False
+    # Optional diagnostics for answer-distribution analyses. Kept behind flags
+    # because storing full-vocabulary softmax vectors can make parquets large.
+    save_clean_answer_probability: bool = False
+    save_stripped_answer_softmax: bool = False
+    stripped_answer_softmax_dtype: str = "float32"
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +399,14 @@ def run_layer_sweep_patching(
     print(f"  Final positions:  {cfg.n_prompt_tokens}")
     print(f"  Severities:       {severities}")
     print(f"  Qwen prefill:     {cfg.qwen_prefill_empty_thinking}")
+    print(f"  Clean answer P:   {cfg.save_clean_answer_probability}")
+    print(
+        f"  Stripped softmax: {cfg.save_stripped_answer_softmax}"
+        + (
+            f" ({cfg.stripped_answer_softmax_dtype})"
+            if cfg.save_stripped_answer_softmax else ""
+        )
+    )
     print(f"  Output:           {output_dir}/")
 
     t0 = time.time()
@@ -470,6 +487,39 @@ def run_layer_sweep_patching(
             clean_fwd["gen_step_logits"], clean_fwd.get("gen_ids"), processor
         )
         clean_score = _score_prediction(cfg.dataset_id, clean_fwd["raw_text"], record)
+        clean_answer_text = clean_fwd["raw_text"]
+        clean_answer_token_ids = _stripped_answer_token_ids(
+            clean_fwd.get("gen_ids"), processor
+        )
+
+        def _extra_answer_stats(fwd: Dict[str, Any]) -> Dict[str, Any]:
+            extra: Dict[str, Any] = {}
+            if cfg.dataset_id == "pope":
+                extra.update(
+                    _compute_pope_answer_probability_stats(
+                        fwd["gen_step_logits"], processor, clean_answer_text
+                    )
+                )
+            if cfg.save_clean_answer_probability:
+                extra.update(
+                    _compute_clean_answer_probability_stats(
+                        fwd["gen_step_logits"],
+                        fwd.get("gen_ids"),
+                        processor,
+                        clean_answer_text=clean_answer_text,
+                        clean_answer_token_ids=clean_answer_token_ids,
+                    )
+                )
+            if cfg.save_stripped_answer_softmax:
+                extra.update(
+                    _compute_stripped_answer_softmax_stats(
+                        fwd["gen_step_logits"],
+                        fwd.get("gen_ids"),
+                        processor,
+                        dtype=cfg.stripped_answer_softmax_dtype,
+                    )
+                )
+            return extra
 
         # ---- per-severity loop --------------------------------------------
         for pert in record.get("visual_perturbations", []):
@@ -512,6 +562,7 @@ def run_layer_sweep_patching(
                 ("clean",   clean_fwd,  clean_stats, clean_score),
                 ("degraded", deg_fwd,  deg_stats,   deg_score),
             ]:
+                answer_stats = _extra_answer_stats(fwd)
                 rows.append({
                     "sample_id": sample_id,
                     "severity": severity,
@@ -523,6 +574,7 @@ def run_layer_sweep_patching(
                     "predicted_answer": fwd["raw_text"],
                     "score": score,
                     **stats,
+                    **answer_stats,
                 })
 
             # ---- layer × position sweep -----------------------------------
@@ -543,6 +595,7 @@ def run_layer_sweep_patching(
                     patched_stats = _compute_output_stats(
                         patched_fwd["gen_step_logits"], patched_fwd.get("gen_ids"), processor
                     )
+                    patched_answer_stats = _extra_answer_stats(patched_fwd)
                     patched_score = _score_prediction(
                         cfg.dataset_id, patched_fwd["raw_text"], record,
                     )
@@ -558,6 +611,7 @@ def run_layer_sweep_patching(
                         "predicted_answer": patched_fwd["raw_text"],
                         "score": patched_score,
                         **patched_stats,
+                        **patched_answer_stats,
                     })
 
                     if cfg.verbose:
@@ -602,13 +656,18 @@ def run_layer_sweep_patching(
     _print_layer_sweep_summary(rows, output_dir)
 
     from pathlib import Path as _Path
-    from src.cli.plot_sweep_filtered import plot_layer_sweep_combined
+    from src.cli.plot_sweep_filtered import (
+        plot_layer_sweep_combined,
+        plot_pope_clean_answer_layer_sweep,
+    )
 
     parquet_path = os.path.join(output_dir, "layer_sweep_results.parquet")
     try:
         plot_layer_sweep_combined(parquet_path, _Path(output_dir), raw=False)
         plot_layer_sweep_combined(parquet_path, _Path(output_dir), raw=True)
         plot_layer_sweep_combined(parquet_path, _Path(output_dir), raw=True, min_delta=0.0)
+        if cfg.dataset_id == "pope":
+            plot_pope_clean_answer_layer_sweep(parquet_path, _Path(output_dir))
     except Exception as e:
         print(f"[layer-sweep] Plot step failed ({type(e).__name__}: {e}); parquet written OK.")
 
@@ -630,7 +689,10 @@ def _write_intermediate_snapshot(
     """
     import pandas as pd
     from pathlib import Path as _Path
-    from src.cli.plot_sweep_filtered import plot_layer_sweep_combined
+    from src.cli.plot_sweep_filtered import (
+        plot_layer_sweep_combined,
+        plot_pope_clean_answer_layer_sweep,
+    )
 
     snap_dir = os.path.join(output_dir, f"intermediate_at_{n_samples}")
     os.makedirs(snap_dir, exist_ok=True)
@@ -642,6 +704,7 @@ def _write_intermediate_snapshot(
         plot_layer_sweep_combined(snap_parquet, _Path(snap_dir), raw=False)
         plot_layer_sweep_combined(snap_parquet, _Path(snap_dir), raw=True)
         plot_layer_sweep_combined(snap_parquet, _Path(snap_dir), raw=True, min_delta=0.0)
+        plot_pope_clean_answer_layer_sweep(snap_parquet, _Path(snap_dir))
     except Exception as e:
         print(
             f"[layer-sweep] Intermediate plot step failed "

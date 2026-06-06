@@ -24,10 +24,13 @@ try:
         MIN_POS_SAMPLES,
         MODEL_SPECS,
         OUTPUT_ROOT,
+        POSITIONAL_PATCH_LAYER,
         QWEN_VISUAL_MIN_FRACTION,
         REPO_ROOT,
         SPAN_DISPLAY,
+        all_layer_sweep_paths,
         all_parquet_paths,
+        layer_sweep_path,
         parquet_path,
         patching_dataset_path,
         supervised_metadata_path,
@@ -40,10 +43,13 @@ except ImportError:  # pragma: no cover - useful when running scripts directly.
         MIN_POS_SAMPLES,
         MODEL_SPECS,
         OUTPUT_ROOT,
+        POSITIONAL_PATCH_LAYER,
         QWEN_VISUAL_MIN_FRACTION,
         REPO_ROOT,
         SPAN_DISPLAY,
+        all_layer_sweep_paths,
         all_parquet_paths,
+        layer_sweep_path,
         parquet_path,
         patching_dataset_path,
         supervised_metadata_path,
@@ -59,6 +65,7 @@ try:
         METRICS,
         aggregate_recovery_ci,
         compute_recovery,
+        _prepare_layer_sweep,
         _prepare_positional_sweep,
     )
 except Exception:  # pragma: no cover - kept as a transparent fallback.
@@ -145,8 +152,44 @@ except Exception:  # pragma: no cover - kept as a transparent fallback.
         n_total = df[df["condition"] == "clean"]["sample_id"].nunique()
         return patched, canonical_xs, span_regions, sevs, n_total, patched["sample_id"].nunique()
 
+    def _prepare_layer_sweep(
+        parquet_path: str,
+        min_delta: float = 0.0,
+        span_label: str | None = None,
+    ):
+        df = pd.read_parquet(parquet_path)
+        patched = df[df["condition"] == "patched"].copy()
+        if span_label is None:
+            patched = patched[patched["position_offset"] == -1]
+        else:
+            patched = patched[patched["span_label"] == span_label]
+        for cond in ("clean", "degraded"):
+            bl = (
+                df[df["condition"] == cond][["sample_id", "severity"] + METRICS]
+                .rename(columns={m: f"{cond}_{m}" for m in METRICS})
+            )
+            patched = patched.merge(bl, on=["sample_id", "severity"])
+        for metric in METRICS:
+            patched[f"recovery_{metric}"] = compute_recovery(
+                patched[metric].values,
+                patched[f"clean_{metric}"].values,
+                patched[f"degraded_{metric}"].values,
+            )
+        layers = sorted(patched["layer"].dropna().unique().astype(int))
+        sevs = sorted(patched["severity"].dropna().unique())
+        return patched, layers, sevs, patched["sample_id"].nunique(), patched["sample_id"].nunique()
+
 
 ANSWER_STRIP_RE = re.compile(r"^\s*<think>.*?</think>\s*", flags=re.DOTALL)
+GROUND_TRUTH_KEYS = (
+    "correct_answer",
+    "gt_answer",
+    "gt_label",
+    "gt_key",
+    "label",
+    "class_name",
+    "category",
+)
 
 
 def stripped_answer(value: Any) -> str:
@@ -163,11 +206,125 @@ def norm_answer(value: Any) -> str:
     return " ".join(stripped_answer(value).lower().split())
 
 
+def clean_ground_truth_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and math.isnan(value):
+        return ""
+    text = str(value).strip()
+    if text.lower() in {"", "none", "nan", "null"}:
+        return ""
+    return text
+
+
+def ground_truth_candidates(record: dict[str, Any], dataset: str | None = None) -> list[str]:
+    accepted = [clean_ground_truth_value(x) for x in (record.get("gt_answers") or [])]
+    accepted = [x for x in accepted if x]
+    if accepted:
+        return accepted
+
+    for key in GROUND_TRUTH_KEYS:
+        value = clean_ground_truth_value(record.get(key))
+        if value:
+            return [value]
+    return []
+
+
+def pope_answer_bucket(value: Any) -> str:
+    tokens = re.findall(r"[a-z]+", norm_answer(value))
+    if not tokens:
+        return "other"
+    if tokens[0] == "yes":
+        return "yes"
+    if tokens[0] == "no":
+        return "no"
+    return "other"
+
+
+def answer_matches_ground_truth(answer: Any, dataset: str, candidates: list[str]) -> bool:
+    if not candidates:
+        return False
+    if dataset == "pope":
+        answer_bucket = pope_answer_bucket(answer)
+        return answer_bucket in {pope_answer_bucket(candidate) for candidate in candidates}
+    answer_norm = norm_answer(answer)
+    return bool(answer_norm) and answer_norm in {norm_answer(candidate) for candidate in candidates}
+
+
 def confidence_column(df: pd.DataFrame) -> str:
     for col in ("answer_geom_prob", "answer_geom_mean_probability", "top1_probability"):
         if col in df.columns:
             return col
     raise KeyError("No confidence column found. Expected answer_geom_prob, answer_geom_mean_probability, or top1_probability.")
+
+
+def baseline_output_frame(
+    raw: pd.DataFrame,
+    condition: str,
+    conf_col: str,
+    include_clean_answer_probability: bool = True,
+) -> pd.DataFrame:
+    cols = ["sample_id", "severity", "predicted_answer", "score", "top1_probability"]
+    if conf_col not in cols:
+        cols.append(conf_col)
+    if include_clean_answer_probability and "clean_answer_probability" in raw.columns:
+        cols.append("clean_answer_probability")
+    base = (
+        raw[raw["condition"] == condition][cols]
+        .drop_duplicates(["sample_id", "severity"])
+        .rename(
+            columns={
+                "predicted_answer": f"{condition}_answer",
+                "score": f"{condition}_correctness",
+                "top1_probability": f"{condition}_plot_confidence",
+            }
+        )
+    )
+    if conf_col == "top1_probability":
+        base[f"{condition}_confidence"] = base[f"{condition}_plot_confidence"]
+    else:
+        base = base.rename(columns={conf_col: f"{condition}_confidence"})
+    if "clean_answer_probability" in base.columns:
+        base = base.rename(columns={"clean_answer_probability": f"{condition}_clean_answer_probability"})
+    return base
+
+
+def normalize_patched_outputs(patched: pd.DataFrame, conf_col: str) -> pd.DataFrame:
+    rename_cols = {
+        "predicted_answer": "patched_answer",
+        "score": "patched_correctness",
+        "top1_probability": "patched_plot_confidence",
+        "recovery_score": "accuracy_recovery",
+        "recovery_top1_probability": "confidence_recovery",
+        "recovery_clean_answer_probability": "clean_answer_confidence_recovery",
+        "clean_answer_probability": "patched_clean_answer_probability",
+    }
+    if conf_col != "top1_probability":
+        rename_cols[conf_col] = "patched_confidence"
+    patched = patched.rename(columns=rename_cols)
+    if "patched_confidence" not in patched.columns:
+        patched["patched_confidence"] = patched["patched_plot_confidence"]
+    return patched
+
+
+def add_clean_answer_confidence_recovery(frame: pd.DataFrame) -> pd.DataFrame:
+    frame = frame.copy()
+    if "clean_answer_confidence_recovery" in frame.columns:
+        return frame
+    required = {
+        "patched_clean_answer_probability",
+        "clean_clean_answer_probability",
+        "degraded_clean_answer_probability",
+    }
+    if required.issubset(frame.columns):
+        frame["clean_answer_confidence_recovery"] = compute_recovery(
+            frame["patched_clean_answer_probability"].values,
+            frame["clean_clean_answer_probability"].values,
+            frame["degraded_clean_answer_probability"].values,
+        )
+    else:
+        frame["clean_answer_confidence_recovery"] = np.nan
+    return frame
 
 
 def _span_minimums(model_label: str, parquet: Path) -> dict[str, int] | None:
@@ -201,41 +358,21 @@ def plot_rows(model_label: str, dataset: str) -> pd.DataFrame:
 
     raw = raw_parquet(model_label, dataset)
     conf_col = confidence_column(raw)
-    baseline_cols = [
-        "sample_id",
-        "severity",
-        "predicted_answer",
-        "score",
-        "top1_probability",
-        conf_col,
-    ]
     for cond in ("clean", "degraded"):
-        base = (
-            raw[raw["condition"] == cond][baseline_cols]
-            .drop_duplicates(["sample_id", "severity"])
-            .rename(
-                columns={
-                    "predicted_answer": f"{cond}_answer",
-                    "score": f"{cond}_correctness",
-                    "top1_probability": f"{cond}_plot_confidence",
-                    conf_col: f"{cond}_confidence",
-                }
-            )
+        include_clean_answer_probability = f"{cond}_clean_answer_probability" not in patched.columns
+        patched = patched.merge(
+            baseline_output_frame(
+                raw,
+                cond,
+                conf_col,
+                include_clean_answer_probability=include_clean_answer_probability,
+            ),
+            on=["sample_id", "severity"],
+            how="left",
         )
-        patched = patched.merge(base, on=["sample_id", "severity"], how="left")
 
-    patched = patched.rename(
-        columns={
-            "predicted_answer": "patched_answer",
-            "score": "patched_correctness",
-            "top1_probability": "patched_plot_confidence",
-            conf_col: "patched_confidence",
-            "recovery_score": "accuracy_recovery",
-            "recovery_top1_probability": "confidence_recovery",
-        }
-    )
-    if "patched_confidence" not in patched.columns:
-        patched["patched_confidence"] = patched["patched_plot_confidence"]
+    patched = normalize_patched_outputs(patched, conf_col)
+    patched = add_clean_answer_confidence_recovery(patched)
     for cond in ("clean", "degraded"):
         if f"{cond}_confidence" not in patched.columns:
             patched[f"{cond}_confidence"] = patched[f"{cond}_plot_confidence"]
@@ -243,6 +380,7 @@ def plot_rows(model_label: str, dataset: str) -> pd.DataFrame:
     patched["model"] = model_label
     patched["dataset"] = dataset
     patched["dataset_label"] = DATASET_LABELS.get(dataset, dataset)
+    patched["sweep_type"] = "positional"
     patched["span_display"] = patched["span_label"].map(lambda x: SPAN_DISPLAY.get(str(x), str(x)))
     patched["patched_token_position"] = patched["token_position"].astype(int)
     patched["patched_position_index"] = patched["position_index"].astype(int)
@@ -256,6 +394,7 @@ def plot_rows(model_label: str, dataset: str) -> pd.DataFrame:
     patched["correctness_improved"] = patched["patched_correctness"] > patched["degraded_correctness"]
     patched["confidence_improved"] = patched["patched_confidence"] > patched["degraded_confidence"]
     patched["confidence_exceeds_clean"] = patched["patched_confidence"] > patched["clean_confidence"]
+    patched = add_viewer_helper_columns(patched, model_label, dataset)
 
     final_pos = patched.groupby(["sample_id", "severity"])["patched_token_position"].transform("max")
     patched["is_final_prompt_token"] = patched["patched_token_position"] == final_pos
@@ -273,12 +412,102 @@ def plot_rows(model_label: str, dataset: str) -> pd.DataFrame:
     return patched
 
 
+@lru_cache(maxsize=16)
+def raw_layer_parquet(model_label: str, dataset: str) -> pd.DataFrame:
+    path = layer_sweep_path(model_label, dataset)
+    df = pd.read_parquet(path)
+    df["sample_id"] = df["sample_id"].astype(str)
+    return df
+
+
+@lru_cache(maxsize=16)
+def layer_rows(model_label: str, dataset: str) -> pd.DataFrame:
+    path = layer_sweep_path(model_label, dataset)
+    raw = raw_layer_parquet(model_label, dataset)
+    layer_metrics = list(METRICS)
+    if "clean_answer_probability" in raw.columns and "clean_answer_probability" not in layer_metrics:
+        layer_metrics.append("clean_answer_probability")
+    patched, _, _, _, _ = _prepare_layer_sweep(
+        str(path),
+        min_delta=0.0,
+        metrics=layer_metrics,
+    )
+    patched = patched.copy()
+    patched["sample_id"] = patched["sample_id"].astype(str)
+
+    conf_col = confidence_column(raw)
+    for cond in ("clean", "degraded"):
+        include_clean_answer_probability = f"{cond}_clean_answer_probability" not in patched.columns
+        patched = patched.merge(
+            baseline_output_frame(
+                raw,
+                cond,
+                conf_col,
+                include_clean_answer_probability=include_clean_answer_probability,
+            ),
+            on=["sample_id", "severity"],
+            how="left",
+        )
+
+    patched = normalize_patched_outputs(patched, conf_col)
+    patched = add_clean_answer_confidence_recovery(patched)
+    for cond in ("clean", "degraded"):
+        if f"{cond}_confidence" not in patched.columns:
+            patched[f"{cond}_confidence"] = patched[f"{cond}_plot_confidence"]
+
+    patched["model"] = model_label
+    patched["dataset"] = dataset
+    patched["dataset_label"] = DATASET_LABELS.get(dataset, dataset)
+    patched["sweep_type"] = "layer"
+    patched["span_label"] = "final_prompt"
+    patched["span_display"] = "Final prompt token"
+    patched["patched_token_position"] = patched["token_position"].astype(int)
+    patched["patched_position_index"] = patched["position_offset"].astype(int)
+    patched["span_rel_pos"] = patched["position_offset"].astype(int)
+    patched["patch_layer"] = patched["layer"].astype(int)
+    patched["clean_answer_stripped"] = patched["clean_answer"].map(stripped_answer)
+    patched["degraded_answer_stripped"] = patched["degraded_answer"].map(stripped_answer)
+    patched["patched_answer_stripped"] = patched["patched_answer"].map(stripped_answer)
+    patched["answer_changed"] = patched["patched_answer_stripped"] != patched["degraded_answer_stripped"]
+    patched["answer_changed_normalized"] = (
+        patched["patched_answer"].map(norm_answer) != patched["degraded_answer"].map(norm_answer)
+    )
+    patched["correctness_improved"] = patched["patched_correctness"] > patched["degraded_correctness"]
+    patched["confidence_improved"] = patched["patched_confidence"] > patched["degraded_confidence"]
+    patched["confidence_exceeds_clean"] = patched["patched_confidence"] > patched["clean_confidence"]
+    patched = add_viewer_helper_columns(patched, model_label, dataset)
+    patched["is_final_prompt_token"] = True
+    patched["row_id"] = (
+        patched["model"].astype(str)
+        + " | "
+        + patched["dataset"].astype(str)
+        + " | sample "
+        + patched["sample_id"].astype(str)
+        + " | final prompt pos "
+        + patched["patched_token_position"].astype(str)
+        + " | layer "
+        + patched["patch_layer"].astype(str)
+    )
+    return patched
+
+
 @lru_cache(maxsize=1)
 def all_plot_rows() -> pd.DataFrame:
     frames = []
     for (model_label, dataset), path in all_parquet_paths().items():
         if path.exists():
             frames.append(plot_rows(model_label, dataset))
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+@lru_cache(maxsize=1)
+def all_layer_plot_rows() -> pd.DataFrame:
+    frames = []
+    for (model_label, dataset), path in all_layer_sweep_paths().items():
+        if path.exists():
+            frames.append(layer_rows(model_label, dataset))
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
@@ -297,6 +526,152 @@ def sample_record(model_label: str, dataset: str, sample_id: str) -> dict[str, A
     return records_by_id(model_label, dataset).get(str(sample_id), {})
 
 
+def _correctness_flag(scores: pd.Series, dataset: str) -> pd.Series:
+    numeric = pd.to_numeric(scores, errors="coerce").fillna(0.0)
+    if dataset == "vqa-v2":
+        return numeric > 0
+    return numeric >= 1.0
+
+
+def _correctness_labels(scores: pd.Series, correct: pd.Series, dataset: str) -> pd.Series:
+    numeric = pd.to_numeric(scores, errors="coerce").fillna(0.0)
+    labels = np.where(correct.to_numpy(dtype=bool), "C", "I").astype(object)
+    if dataset == "vqa-v2":
+        labels = np.array([f"{label} ({score:.2f})" for label, score in zip(labels, numeric)], dtype=object)
+    return pd.Series(labels, index=scores.index)
+
+
+def _answer_transition_part(value: Any) -> str:
+    text = norm_answer(value)
+    return text if text else "(empty)"
+
+
+def add_viewer_helper_columns(frame: pd.DataFrame, model_label: str, dataset: str) -> pd.DataFrame:
+    frame = frame.copy()
+    for cond in ("clean", "degraded"):
+        base_col = f"{cond}_clean_answer_probability"
+        suffixed = [f"{base_col}_x", f"{base_col}_y"]
+        if base_col not in frame.columns:
+            for candidate in suffixed:
+                if candidate in frame.columns:
+                    frame[base_col] = frame[candidate]
+                    break
+
+    frame["corrupted_answer"] = frame["degraded_answer"]
+    frame["corrupted_correctness"] = frame["degraded_correctness"]
+    frame["corrupted_confidence"] = frame["degraded_confidence"]
+    if "degraded_clean_answer_probability" in frame.columns:
+        frame["corrupted_clean_answer_probability"] = frame["degraded_clean_answer_probability"]
+    else:
+        frame["corrupted_clean_answer_probability"] = np.nan
+    frame["corrupted_answer_stripped"] = frame["degraded_answer_stripped"]
+    if "patch_layer" not in frame.columns:
+        frame["patch_layer"] = POSITIONAL_PATCH_LAYER
+    frame["patch_layer"] = (
+        pd.to_numeric(frame["patch_layer"], errors="coerce")
+        .fillna(POSITIONAL_PATCH_LAYER)
+        .astype(int)
+    )
+    frame["patch_layer_display"] = frame["patch_layer"].map(lambda layer: f"Hidden-state layer {layer}")
+
+    frame["clean_correct"] = _correctness_flag(frame["clean_correctness"], dataset)
+    frame["corrupted_correct"] = _correctness_flag(frame["corrupted_correctness"], dataset)
+    frame["patched_correct"] = _correctness_flag(frame["patched_correctness"], dataset)
+    frame["clean_correctness_label"] = _correctness_labels(
+        frame["clean_correctness"], frame["clean_correct"], dataset
+    )
+    frame["corrupted_correctness_label"] = _correctness_labels(
+        frame["corrupted_correctness"], frame["corrupted_correct"], dataset
+    )
+    frame["patched_correctness_label"] = _correctness_labels(
+        frame["patched_correctness"], frame["patched_correct"], dataset
+    )
+    clean_pattern = pd.Series(np.where(frame["clean_correct"], "C", "I"), index=frame.index)
+    corrupted_pattern = pd.Series(np.where(frame["corrupted_correct"], "C", "I"), index=frame.index)
+    patched_pattern = pd.Series(np.where(frame["patched_correct"], "C", "I"), index=frame.index)
+    frame["correctness_pattern"] = clean_pattern + " -> " + corrupted_pattern + " -> " + patched_pattern
+
+    frame["delta_conf_corruption"] = frame["corrupted_confidence"] - frame["clean_confidence"]
+    frame["delta_conf_patch"] = frame["patched_confidence"] - frame["corrupted_confidence"]
+    frame["delta_conf_patch_vs_clean"] = frame["patched_confidence"] - frame["clean_confidence"]
+    frame["abs_delta_conf_patch"] = frame["delta_conf_patch"].abs()
+
+    frame["clean_answer_norm"] = frame["clean_answer"].map(norm_answer)
+    frame["corrupted_answer_norm"] = frame["corrupted_answer"].map(norm_answer)
+    frame["patched_answer_norm"] = frame["patched_answer"].map(norm_answer)
+    frame["corrupted_changed_answer"] = frame["corrupted_answer_norm"] != frame["clean_answer_norm"]
+    frame["patch_changed_answer"] = frame["patched_answer_norm"] != frame["corrupted_answer_norm"]
+    frame["patched_matches_clean_answer"] = frame["patched_answer_norm"] == frame["clean_answer_norm"]
+
+    frame["clean_answer_pope"] = frame["clean_answer"].map(pope_answer_bucket)
+    frame["corrupted_answer_pope"] = frame["corrupted_answer"].map(pope_answer_bucket)
+    frame["patched_answer_pope"] = frame["patched_answer"].map(pope_answer_bucket)
+    if dataset == "pope":
+        clean_parts = frame["clean_answer_pope"]
+        corrupted_parts = frame["corrupted_answer_pope"]
+        patched_parts = frame["patched_answer_pope"]
+    else:
+        clean_parts = frame["clean_answer"].map(_answer_transition_part)
+        corrupted_parts = frame["corrupted_answer"].map(_answer_transition_part)
+        patched_parts = frame["patched_answer"].map(_answer_transition_part)
+    frame["answer_transition"] = clean_parts + " -> " + corrupted_parts + " -> " + patched_parts
+
+    records = records_by_id(model_label, dataset)
+    gt_map: dict[str, set[str]] = {}
+    for sample_id, record in records.items():
+        candidates = ground_truth_candidates(record, dataset)
+        if dataset == "pope":
+            values = {pope_answer_bucket(candidate) for candidate in candidates}
+        else:
+            values = {norm_answer(candidate) for candidate in candidates if norm_answer(candidate)}
+        gt_map[str(sample_id)] = values
+
+    if dataset == "pope":
+        frame["patched_matches_ground_truth"] = [
+            answer in gt_map.get(str(sample_id), set())
+            for sample_id, answer in zip(frame["sample_id"], frame["patched_answer_pope"])
+        ]
+    else:
+        frame["patched_matches_ground_truth"] = [
+            bool(answer) and answer in gt_map.get(str(sample_id), set())
+            for sample_id, answer in zip(frame["sample_id"], frame["patched_answer_norm"])
+        ]
+
+    return frame
+
+
+VIEWER_HELPER_COLUMNS = {
+    "clean_correct",
+    "corrupted_correct",
+    "patched_correct",
+    "correctness_pattern",
+    "delta_conf_corruption",
+    "delta_conf_patch",
+    "delta_conf_patch_vs_clean",
+    "answer_transition",
+    "patched_matches_clean_answer",
+    "patch_changed_answer",
+    "corrupted_changed_answer",
+    "patched_matches_ground_truth",
+    "clean_answer_pope",
+    "corrupted_answer_pope",
+    "patched_answer_pope",
+    "corrupted_clean_answer_probability",
+    "patch_layer",
+    "patch_layer_display",
+}
+
+
+def ensure_viewer_helper_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty or VIEWER_HELPER_COLUMNS.issubset(frame.columns):
+        return frame
+
+    enriched = []
+    for (model_label, dataset), group in frame.groupby(["model", "dataset"], sort=False):
+        enriched.append(add_viewer_helper_columns(group, str(model_label), str(dataset)))
+    return pd.concat(enriched, ignore_index=True) if enriched else frame
+
+
 def blurred_image_path(record: dict[str, Any], severity: str) -> str:
     for perturbation in record.get("visual_perturbations", []) or []:
         if perturbation.get("severity") == severity:
@@ -305,33 +680,15 @@ def blurred_image_path(record: dict[str, Any], severity: str) -> str:
 
 
 def ground_truth_text(record: dict[str, Any], dataset: str) -> str:
-    def clean_value(value: Any) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, float) and math.isnan(value):
-            return ""
-        text = str(value).strip()
-        if text.lower() in {"", "none", "nan", "null"}:
-            return ""
-        return text
-
-    accepted = [clean_value(x) for x in (record.get("gt_answers") or [])]
+    accepted = [clean_ground_truth_value(x) for x in (record.get("gt_answers") or [])]
     accepted = [x for x in accepted if x]
     if accepted:
         counts = pd.Series([str(x) for x in accepted]).value_counts()
         answers = ", ".join(f"{answer} ({count})" for answer, count in counts.items())
         return f"{answers}"
 
-    for key in (
-        "correct_answer",
-        "gt_answer",
-        "gt_label",
-        "gt_key",
-        "label",
-        "class_name",
-        "category",
-    ):
-        value = clean_value(record.get(key))
+    for key in GROUND_TRUTH_KEYS:
+        value = clean_ground_truth_value(record.get(key))
         if value:
             return value
     return "Not available in source record."
@@ -392,6 +749,18 @@ def load_processor(model_label: str):
             last_error = exc
             continue
     raise RuntimeError(f"Could not load cached processor for {model_label}: {last_error}")
+
+
+def clear_runtime_caches() -> None:
+    """Clear in-process caches so Streamlit can reload data without a server restart."""
+    raw_parquet.cache_clear()
+    plot_rows.cache_clear()
+    all_plot_rows.cache_clear()
+    raw_layer_parquet.cache_clear()
+    layer_rows.cache_clear()
+    all_layer_plot_rows.cache_clear()
+    records_by_id.cache_clear()
+    load_processor.cache_clear()
 
 
 def _dict_dimension(value: Any, key: str, default: int) -> int:
@@ -672,11 +1041,18 @@ def _regular_grid_rect(
     return x0, y0, x1, y1
 
 
-def _resize_shortest_edge_size(width: int, height: int, shortest_edge: int) -> tuple[int, int, float]:
+def _resize_shortest_edge_size(width: int, height: int, shortest_edge: int) -> tuple[int, int, float, float]:
     if width <= 0 or height <= 0 or shortest_edge <= 0:
-        return width, height, 1.0
-    scale = shortest_edge / min(width, height)
-    return max(1, round(width * scale)), max(1, round(height * scale)), scale
+        return width, height, 1.0, 1.0
+    if width <= height:
+        resized_w = shortest_edge
+        resized_h = int(shortest_edge * height / width)
+    else:
+        resized_h = shortest_edge
+        resized_w = int(shortest_edge * width / height)
+    resized_w = max(1, resized_w)
+    resized_h = max(1, resized_h)
+    return resized_w, resized_h, resized_w / width, resized_h / height
 
 
 def _llava_clip_rect(
@@ -691,17 +1067,17 @@ def _llava_clip_rect(
     crop_w = int(geometry.get("crop_width", 336))
     crop_h = int(geometry.get("crop_height", 336))
     shortest = int(geometry.get("shortest_edge", min(crop_w, crop_h)))
-    resized_w, resized_h, scale = _resize_shortest_edge_size(width, height, shortest)
+    resized_w, resized_h, scale_x, scale_y = _resize_shortest_edge_size(width, height, shortest)
     crop_left = max(0.0, (resized_w - crop_w) / 2.0)
     crop_top = max(0.0, (resized_h - crop_h) / 2.0)
     cell_x0 = col * crop_w / cols
     cell_y0 = row * crop_h / rows
     cell_x1 = (col + 1) * crop_w / cols
     cell_y1 = (row + 1) * crop_h / rows
-    x0 = math.floor((crop_left + cell_x0) / scale)
-    y0 = math.floor((crop_top + cell_y0) / scale)
-    x1 = math.ceil((crop_left + cell_x1) / scale)
-    y1 = math.ceil((crop_top + cell_y1) / scale)
+    x0 = math.floor((crop_left + cell_x0) / scale_x)
+    y0 = math.floor((crop_top + cell_y0) / scale_y)
+    x1 = math.ceil((crop_left + cell_x1) / scale_x)
+    y1 = math.ceil((crop_top + cell_y1) / scale_y)
     return (
         max(0, min(width, x0)),
         max(0, min(height, y0)),
@@ -822,6 +1198,46 @@ def highlighted_degraded_image(
     return highlighted, meta, note
 
 
+def highlighted_clean_marker_image(
+    model_label: str,
+    clean_path: str,
+    visual_rel_pos: int,
+    visual_token_count: int,
+    visual_geometry: dict[str, Any] | None = None,
+    max_side: int = 900,
+) -> tuple[Image.Image | None, dict[str, Any], str]:
+    if not clean_path:
+        return None, {}, "Clean image path is missing."
+    clean = Image.open(clean_path).convert("RGB")
+    rect, meta, note = visual_token_rectangle(
+        clean.size,
+        visual_rel_pos,
+        visual_token_count,
+        visual_geometry,
+    )
+    meta["model"] = model_label
+    if rect is None:
+        clean.close()
+        return None, meta, note
+    x0, y0, x1, y1 = rect
+    scale = min(max_side / max(clean.size), 1.0)
+    if scale < 1.0:
+        size = (round(clean.width * scale), round(clean.height * scale))
+        clean = clean.resize(size, Image.Resampling.LANCZOS)
+        x0 = round(x0 * scale)
+        y0 = round(y0 * scale)
+        x1 = round(x1 * scale)
+        y1 = round(y1 * scale)
+    highlighted = clean.copy()
+    draw = ImageDraw.Draw(highlighted, "RGBA")
+    fill = (253, 224, 71, 90)
+    outline = (245, 158, 11, 255)
+    draw.rectangle((x0, y0, x1 - 1, y1 - 1), fill=fill, outline=outline, width=5)
+    draw.rectangle((x0 + 5, y0 + 5, x1 - 6, y1 - 6), outline=(255, 255, 255, 235), width=2)
+    meta["rect"] = [x0, y0, x1, y1]
+    return highlighted, meta, note
+
+
 def format_answer_with_conf(answer: Any, confidence: Any) -> str:
     try:
         conf = float(confidence)
@@ -862,6 +1278,7 @@ def compact_row_dict(row: pd.Series, record: dict[str, Any] | None = None, categ
         "patched_token_position": int(row["patched_token_position"]),
         "span_relative_position": int(row["span_rel_pos"]),
         "position_index": int(row["patched_position_index"]),
+        "patch_layer": int(row.get("patch_layer", POSITIONAL_PATCH_LAYER)),
         "clean_answer": row["clean_answer_stripped"],
         "degraded_answer": row["degraded_answer_stripped"],
         "patched_answer": row["patched_answer_stripped"],
@@ -874,6 +1291,7 @@ def compact_row_dict(row: pd.Series, record: dict[str, Any] | None = None, categ
         "patched_confidence": float(row["patched_confidence"]),
         "accuracy_recovery": float(row["accuracy_recovery"]),
         "confidence_recovery": float(row["confidence_recovery"]),
+        "clean_answer_confidence_recovery": float(row.get("clean_answer_confidence_recovery", float("nan"))),
         "answer_changed": bool(row["answer_changed"]),
         "correctness_improved": bool(row["correctness_improved"]),
         "confidence_improved": bool(row["confidence_improved"]),

@@ -22,6 +22,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
@@ -33,6 +34,12 @@ from src.patching.collect_activations import (
     _format_prompt,
     _score_prediction,
     _MAX_NEW_TOKENS,
+)
+from src.uq_dataset_generation.tasks.pope import (
+    _NO_SURFACE_FORMS,
+    _YES_SURFACE_FORMS,
+    _collect_unique_token_ids,
+    _extract_yes_no_answer,
 )
 from src.vlm import (
     VLMAdapter,
@@ -102,6 +109,18 @@ def _answer_token_indices(gen_ids: torch.Tensor, processor: Any) -> List[int]:
         keep.pop()
 
     return keep
+
+
+def _stripped_answer_token_ids(gen_ids: torch.Tensor, processor: Any) -> List[int]:
+    """Generated token IDs that make up the stripped evaluated answer."""
+    if gen_ids is None or not isinstance(gen_ids, torch.Tensor):
+        return []
+    token_ids = [int(t) for t in gen_ids[0].tolist()] if gen_ids.ndim == 2 and gen_ids.shape[0] else []
+    return [
+        token_ids[idx]
+        for idx in _answer_token_indices(gen_ids, processor)
+        if 0 <= idx < len(token_ids)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +397,261 @@ def _compute_output_stats(
         "answer_token_text": json.dumps(token_texts),
         "first_generated_token_top1_probability": first_top1_prob,
         "first_generated_token_entropy": first_entropy,
+    }
+
+
+def _token_prob_entry(
+    *,
+    probs: torch.Tensor,
+    log_probs: torch.Tensor,
+    token_ids: List[int],
+    processor: Any,
+    prefix: str,
+) -> Dict[str, Any]:
+    """Return max-probability stats over tokenized answer surface variants."""
+    if not token_ids:
+        return {
+            f"{prefix}_probability": float("nan"),
+            f"{prefix}_logprob": float("nan"),
+            f"{prefix}_token_id": None,
+            f"{prefix}_token_text": "",
+            f"{prefix}_candidate_token_ids": "[]",
+        }
+
+    device = probs.device
+    idx = torch.tensor(token_ids, device=device, dtype=torch.long)
+    candidate_probs = probs[idx]
+    best_pos = int(torch.argmax(candidate_probs).item())
+    token_id = int(token_ids[best_pos])
+    return {
+        f"{prefix}_probability": float(candidate_probs[best_pos].item()),
+        f"{prefix}_logprob": float(log_probs[token_id].item()),
+        f"{prefix}_token_id": token_id,
+        f"{prefix}_token_text": _token_piece(processor, token_id),
+        f"{prefix}_candidate_token_ids": json.dumps(token_ids),
+    }
+
+
+def _compute_pope_answer_probability_stats(
+    gen_step_logits: torch.Tensor,
+    processor: Any,
+    clean_answer: Optional[str],
+) -> Dict[str, Any]:
+    """POPE yes/no probabilities from the first real answer-token distribution.
+
+    Uses the same model-tokenizer surface variants as POPE logit scoring
+    (e.g. "yes", " yes", casing variants). For each answer bucket we retain
+    the highest-probability token variant, matching the existing max-logit
+    yes/no convention while saving probabilities/logprobs for later log-odds.
+    """
+    clean_bucket = _extract_yes_no_answer(clean_answer or "").lower()
+    base = {
+        "clean_answer_text": clean_answer or "",
+        "clean_answer_bucket": clean_bucket if clean_bucket in {"yes", "no"} else "",
+        "clean_answer_probability": float("nan"),
+        "clean_answer_logprob": float("nan"),
+        "clean_answer_token_id": None,
+        "clean_answer_token_text": "",
+    }
+    if (
+        gen_step_logits is None
+        or processor is None
+        or getattr(processor, "tokenizer", None) is None
+        or not isinstance(gen_step_logits, torch.Tensor)
+        or gen_step_logits.ndim < 3
+        or gen_step_logits.shape[1] == 0
+    ):
+        return {
+            **base,
+            "pope_yes_probability": float("nan"),
+            "pope_yes_logprob": float("nan"),
+            "pope_yes_token_id": None,
+            "pope_yes_token_text": "",
+            "pope_yes_candidate_token_ids": "[]",
+            "pope_no_probability": float("nan"),
+            "pope_no_logprob": float("nan"),
+            "pope_no_token_id": None,
+            "pope_no_token_text": "",
+            "pope_no_candidate_token_ids": "[]",
+        }
+
+    tokenizer = processor.tokenizer
+    yes_ids = _collect_unique_token_ids(tokenizer, _YES_SURFACE_FORMS)
+    no_ids = _collect_unique_token_ids(tokenizer, _NO_SURFACE_FORMS)
+    first_logits = gen_step_logits[0, 0, :].float()
+    probs = F.softmax(first_logits, dim=0)
+    log_probs = F.log_softmax(first_logits, dim=0)
+
+    yes_stats = _token_prob_entry(
+        probs=probs,
+        log_probs=log_probs,
+        token_ids=yes_ids,
+        processor=processor,
+        prefix="pope_yes",
+    )
+    no_stats = _token_prob_entry(
+        probs=probs,
+        log_probs=log_probs,
+        token_ids=no_ids,
+        processor=processor,
+        prefix="pope_no",
+    )
+
+    if clean_bucket == "yes":
+        base.update({
+            "clean_answer_probability": yes_stats["pope_yes_probability"],
+            "clean_answer_logprob": yes_stats["pope_yes_logprob"],
+            "clean_answer_token_id": yes_stats["pope_yes_token_id"],
+            "clean_answer_token_text": yes_stats["pope_yes_token_text"],
+        })
+    elif clean_bucket == "no":
+        base.update({
+            "clean_answer_probability": no_stats["pope_no_probability"],
+            "clean_answer_logprob": no_stats["pope_no_logprob"],
+            "clean_answer_token_id": no_stats["pope_no_token_id"],
+            "clean_answer_token_text": no_stats["pope_no_token_text"],
+        })
+
+    return {**base, **yes_stats, **no_stats}
+
+
+def _compute_clean_answer_probability_stats(
+    gen_step_logits: torch.Tensor,
+    gen_ids: Optional[torch.Tensor],
+    processor: Any,
+    *,
+    clean_answer_text: str,
+    clean_answer_token_ids: List[int],
+) -> Dict[str, Any]:
+    """Probability assigned to the clean-run stripped answer tokens.
+
+    The clean answer tokens are taken from the clean run after the same
+    generated-answer stripping used for scoring. For another run, we align
+    those clean tokens to that run's stripped generated-answer positions and
+    report the geometric mean probability when all clean tokens fit.
+    """
+    token_texts = [_token_piece(processor, token_id) for token_id in clean_answer_token_ids]
+    base = {
+        "clean_answer_text": clean_answer_text,
+        "clean_answer_token_ids": json.dumps([int(t) for t in clean_answer_token_ids]),
+        "clean_answer_token_text": json.dumps(token_texts),
+        "clean_answer_token_count": len(clean_answer_token_ids),
+        "clean_answer_probability": float("nan"),
+        "clean_answer_logprob": float("nan"),
+        "clean_answer_probability_token_count": 0,
+        "clean_answer_probability_full_length": False,
+    }
+    if (
+        gen_step_logits is None
+        or gen_ids is None
+        or processor is None
+        or not clean_answer_token_ids
+        or not isinstance(gen_step_logits, torch.Tensor)
+        or not isinstance(gen_ids, torch.Tensor)
+        or gen_step_logits.ndim < 3
+        or gen_step_logits.shape[1] == 0
+    ):
+        return base
+
+    answer_indices = [
+        idx for idx in _answer_token_indices(gen_ids, processor)
+        if idx < gen_step_logits.shape[1]
+    ]
+    if len(answer_indices) < len(clean_answer_token_ids):
+        base["clean_answer_probability_token_count"] = len(answer_indices)
+        return base
+
+    logprobs: List[float] = []
+    vocab_size = int(gen_step_logits.shape[-1])
+    for step_idx, token_id in zip(answer_indices, clean_answer_token_ids):
+        token_id = int(token_id)
+        if token_id < 0 or token_id >= vocab_size:
+            return base
+        log_probs = F.log_softmax(gen_step_logits[0, step_idx, :].float(), dim=0)
+        logprobs.append(float(log_probs[token_id].item()))
+
+    mean_logprob = float(sum(logprobs) / len(logprobs))
+    base.update({
+        "clean_answer_probability": float(torch.exp(torch.tensor(mean_logprob)).item()),
+        "clean_answer_logprob": mean_logprob,
+        "clean_answer_probability_token_count": len(logprobs),
+        "clean_answer_probability_full_length": True,
+    })
+    return base
+
+
+def _compute_stripped_answer_softmax_stats(
+    gen_step_logits: torch.Tensor,
+    gen_ids: Optional[torch.Tensor],
+    processor: Any,
+    *,
+    dtype: str = "float32",
+) -> Dict[str, Any]:
+    """Serialize softmax distributions for stripped generated-answer tokens.
+
+    The binary column is row-major bytes with shape recorded separately as
+    ``[answer_token_count, vocab_size]``. This keeps the parquet self-contained
+    while avoiding enormous nested Python float lists.
+    """
+    dtype = dtype.lower()
+    if dtype not in {"float16", "float32"}:
+        raise ValueError(f"Unsupported stripped-answer softmax dtype: {dtype}")
+
+    vocab_size = (
+        int(gen_step_logits.shape[-1])
+        if isinstance(gen_step_logits, torch.Tensor) and gen_step_logits.ndim >= 3
+        else 0
+    )
+    base = {
+        "stripped_answer_token_indices": "[]",
+        "stripped_answer_token_ids": "[]",
+        "stripped_answer_token_text": "[]",
+        "stripped_answer_token_count": 0,
+        "stripped_answer_softmax_shape": json.dumps([0, vocab_size]),
+        "stripped_answer_softmax_dtype": dtype,
+        "stripped_answer_softmax_encoding": "row_major_bytes",
+        "stripped_answer_softmax_num_bytes": 0,
+        "stripped_answer_softmax_bytes": b"",
+    }
+    if (
+        gen_step_logits is None
+        or gen_ids is None
+        or processor is None
+        or not isinstance(gen_step_logits, torch.Tensor)
+        or not isinstance(gen_ids, torch.Tensor)
+        or gen_step_logits.ndim < 3
+        or gen_step_logits.shape[1] == 0
+    ):
+        return base
+
+    answer_indices = [
+        idx for idx in _answer_token_indices(gen_ids, processor)
+        if idx < gen_step_logits.shape[1]
+    ]
+    token_ids = [int(gen_ids[0, idx].item()) for idx in answer_indices]
+    token_texts = [_token_piece(processor, token_id) for token_id in token_ids]
+    if not answer_indices:
+        base.update({
+            "stripped_answer_token_indices": "[]",
+            "stripped_answer_token_ids": "[]",
+            "stripped_answer_token_text": "[]",
+        })
+        return base
+
+    logits = gen_step_logits[0, answer_indices, :].float()
+    probs = F.softmax(logits, dim=-1).detach().cpu().numpy()
+    probs = probs.astype(np.float16 if dtype == "float16" else np.float32, copy=False)
+    payload = probs.tobytes(order="C")
+    return {
+        "stripped_answer_token_indices": json.dumps([int(i) for i in answer_indices]),
+        "stripped_answer_token_ids": json.dumps(token_ids),
+        "stripped_answer_token_text": json.dumps(token_texts),
+        "stripped_answer_token_count": len(token_ids),
+        "stripped_answer_softmax_shape": json.dumps([len(token_ids), vocab_size]),
+        "stripped_answer_softmax_dtype": dtype,
+        "stripped_answer_softmax_encoding": "row_major_bytes",
+        "stripped_answer_softmax_num_bytes": len(payload),
+        "stripped_answer_softmax_bytes": payload,
     }
 
 

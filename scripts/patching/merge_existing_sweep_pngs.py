@@ -106,25 +106,25 @@ def main() -> None:
         ("POPE", qwen_pos_root / "pope/extreme_answer_confidence/positional_sweep_combined_filtered_raw_nofilter.png"),
         ("VQA-v2", qwen_pos_root / "vqa-v2/extreme/positional_sweep_combined_filtered_raw_nofilter.png"),
         ("ImageNet-R", qwen_pos_root / "imagenet-r/extreme_answer_confidence/positional_sweep_combined_filtered_raw_nofilter.png"),
-        ("COCO-QA-VI", qwen_pos_root / "coco-qa-vi/extreme/positional_sweep_combined_filtered_raw_nofilter.png"),
+        ("COCO-QA", qwen_pos_root / "coco-qa-vi/extreme/positional_sweep_combined_filtered_raw_nofilter.png"),
     ]
     qwen_layer = [
         ("POPE", qwen_layer_root / "pope/extreme_answer_confidence_finaltoken/layer_sweep_combined_filtered_raw_nofilter.png"),
         ("VQA-v2", qwen_layer_root / "vqa-v2/extreme_answer_confidence_finaltoken/layer_sweep_combined_filtered_raw_nofilter.png"),
         ("ImageNet-R", qwen_layer_root / "imagenet-r/extreme_answer_confidence_finaltoken/layer_sweep_combined_filtered_raw_nofilter.png"),
-        ("COCO-QA-VI", qwen_layer_root / "coco-qa-vi/extreme_answer_confidence_finaltoken/layer_sweep_combined_filtered_raw_nofilter.png"),
+        ("COCO-QA", qwen_layer_root / "coco-qa-vi/extreme_answer_confidence_finaltoken/layer_sweep_combined_filtered_raw_nofilter.png"),
     ]
     llava_pos = [
         ("POPE", llava_pos_root / "pope_bug_fix/extreme/positional_sweep_combined_filtered_raw_nofilter.png"),
         ("VQA-v2", llava_pos_root / "vqa-v2_bug_fix/extreme/positional_sweep_combined_filtered_raw_nofilter.png"),
         ("ImageNet-R", llava_pos_root / "imagenet-r_bug_fix/extreme/positional_sweep_combined_filtered_raw_nofilter.png"),
-        ("COCO-QA-VI", llava_pos_root / "coco-qa-vi_bug_fix/extreme/positional_sweep_combined_filtered_raw_nofilter.png"),
+        ("COCO-QA", llava_pos_root / "coco-qa-vi_bug_fix/extreme/positional_sweep_combined_filtered_raw_nofilter.png"),
     ]
     llava_layer = [
         ("POPE", llava_layer_root / "pope/extreme_answer_confidence/layer_sweep_combined_filtered_raw_nofilter.png"),
         ("VQA-v2", llava_layer_root / "vqa-v2/extreme_answer_confidence/layer_sweep_combined_filtered_raw_nofilter.png"),
         ("ImageNet-R", llava_layer_root / "imagenet-r/extreme_answer_confidence/layer_sweep_combined_filtered_raw_nofilter.png"),
-        ("COCO-QA-VI", llava_layer_root / "coco-qa-vi/extreme_answer_confidence/layer_sweep_combined_filtered_raw_nofilter.png"),
+        ("COCO-QA", llava_layer_root / "coco-qa-vi/extreme_answer_confidence/layer_sweep_combined_filtered_raw_nofilter.png"),
     ]
 
     merge(qwen_pos, qwen_pos_root / "merged_answer_confidence_score_positional_sweep", "Qwen3-5-9B: Positional Sweep")

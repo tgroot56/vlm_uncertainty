@@ -89,7 +89,7 @@ def plot_correct_under_blur(parquet: str, dataset_json: str, out_dir: Path, n: i
         )
 
     fig.suptitle(
-        "LLaVA-1.5-7B on COCO-QA-VI — correct answers under extreme (σ=50) blur\n"
+        "LLaVA-1.5-7B on COCO-QA - correct answers under extreme (sigma=50) blur\n"
         f"(degraded baseline accuracy ≈ {deg['score'].mean():.2f}; these {n}/{len(hits)} are examples where the "
         "model was right despite near-uniform visual input)",
         fontsize=11, y=1.005,

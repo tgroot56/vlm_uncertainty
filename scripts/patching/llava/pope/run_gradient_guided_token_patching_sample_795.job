@@ -2,11 +2,11 @@
 
 #SBATCH --partition=gpu_a100
 #SBATCH --gpus=1
-#SBATCH --job-name=pope_llava_layer_sweep_extreme
+#SBATCH --job-name=pope_llava_grad_token_795
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=06:00:00
-#SBATCH --output=slurm_outputs/patching/llava/pope/run_layer_sweep_patching_extreme_%A.out
+#SBATCH --time=04:00:00
+#SBATCH --output=slurm_outputs/patching/llava/pope/run_gradient_guided_token_patching_sample_795_%A.out
 
 module purge
 module load 2025
@@ -35,23 +35,22 @@ VLM_SHORT="${VLM_SHORT//./-}"
 DATASET="${DATASET:-pope}"
 DATASET_SPLIT="${DATASET_SPLIT:-random}"
 DEVICE="${DEVICE:-cuda}"
+SAMPLE_ID="${SAMPLE_ID:-795}"
 SEVERITY="${SEVERITY:-extreme}"
-N_PROMPT_TOKENS="${N_PROMPT_TOKENS:-4}"
-MAX_SAMPLES="${MAX_SAMPLES:-1000}"
-CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-10}"
-PLOT_AT_N_SAMPLES="${PLOT_AT_N_SAMPLES:-100}"
-OUTPUT_TAG="${OUTPUT_TAG:-extreme_answer_confidence}"
+LAYERS="${LAYERS:-7 10 13 18}"
+MAX_PATCHES="${MAX_PATCHES:-8}"
+VISUAL_TOP_K="${VISUAL_TOP_K:-64}"
 
 PATCHING_DATASET="${PATCHING_DATASET:-$VLM_UQ_STORAGE_ROOT/patching/$VLM_SHORT/$DATASET/$DATASET_SPLIT/patching_dataset_$DATASET.json}"
-OUTPUT_DIR="${OUTPUT_DIR:-$VLM_UQ_STORAGE_ROOT/patching/layer_sweep_results/$VLM_SHORT/$DATASET/$DATASET_SPLIT/$OUTPUT_TAG}"
+OUTPUT_DIR="${OUTPUT_DIR:-$VLM_UQ_STORAGE_ROOT/patching/gradient_guided_token_patching/$VLM_SHORT/$DATASET/$DATASET_SPLIT/sample_$SAMPLE_ID}"
 
-srun python -u -m src.cli.run_layer_sweep_patching \
+srun python -u -m src.cli.run_gradient_guided_token_patching \
   --patching_dataset "$PATCHING_DATASET" \
   --vlm "$VLM_ID" \
   --output_dir "$OUTPUT_DIR" \
-  --n_prompt_tokens "$N_PROMPT_TOKENS" \
+  --sample_id "$SAMPLE_ID" \
   --severity "$SEVERITY" \
-  --device "$DEVICE" \
-  --max_samples "$MAX_SAMPLES" \
-  --checkpoint_every "$CHECKPOINT_EVERY" \
-  --plot_at_n_samples "$PLOT_AT_N_SAMPLES"
+  --layers $LAYERS \
+  --max_patches "$MAX_PATCHES" \
+  --visual_top_k "$VISUAL_TOP_K" \
+  --device "$DEVICE"

@@ -3,7 +3,7 @@
 Each cell shows answer-confidence recovery and accuracy recovery overlaid.
 LLaVA uses extreme_answer_confidence parquets; Qwen uses the
 extreme_answer_confidence_finaltoken_qwen_prefill_empty_thinking runs, including
-POPE random.
+POPE.
 
 Output: filtered_plots/cross_model/sample_cutoff/two_metrics_positional_sweep_nofilter_100_alltokenspans.pdf/.png
 """
@@ -39,7 +39,7 @@ model_entries = [
     ("Qwen3.5-9B", qwen_paths),
 ]
 
-print("Generating two-metrics positional-sweep figure (no filter) ...")
+print("Generating two-metrics positional-sweep figure (no filter, unclipped recovery) ...")
 for label, paths in model_entries:
     for ds, p in paths.items():
         exists = Path(p).exists()
@@ -49,10 +49,11 @@ plot_two_metrics_cross_model_positional_sweep(
     model_entries=model_entries,
     datasets=DATASETS,
     output_dir=CROSS_OUT,
-    output_name="two_metrics_positional_sweep_nofilter_100_alltokenspans",
+    output_name="two_metrics_positional_sweep_nofilter_100_alltokenspans_unclipped",
     min_delta=0.0,
     min_pos_samples=100,
     append_nofilter_suffix=False,
+    clip_recovery=False,
 )
 
 print("\nDone.")

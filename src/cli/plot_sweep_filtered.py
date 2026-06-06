@@ -27,6 +27,7 @@ METRICS = ["top1_probability", "output_entropy", "score"]
 
 METRIC_LABELS = {
     "top1_probability": "Answer confidence",
+    "clean_answer_probability": "Clean-answer confidence",
     "output_entropy":   "Output entropy",
     "score":            "Score",
 }
@@ -85,7 +86,7 @@ def compute_recovery(patched_vals, clean_vals, degraded_vals):
     return np.clip(raw, -5, 5)
 
 
-def compute_aggregate_recovery(patched_vals, clean_vals, degraded_vals):
+def compute_aggregate_recovery(patched_vals, clean_vals, degraded_vals, clip: bool = True):
     patched_vals = np.asarray(patched_vals, dtype=float)
     clean_vals = np.asarray(clean_vals, dtype=float)
     degraded_vals = np.asarray(degraded_vals, dtype=float)
@@ -99,10 +100,18 @@ def compute_aggregate_recovery(patched_vals, clean_vals, degraded_vals):
     delta = clean_mean - degraded_mean
     eps = EPSILON if delta >= 0 else -EPSILON
     raw = (patched_mean - degraded_mean) / (delta + eps)
-    return float(np.clip(raw, -5, 5))
+    if clip:
+        raw = np.clip(raw, -5, 5)
+    return float(raw)
 
 
-def aggregate_recovery_ci(frame: pd.DataFrame, metric: str, n: int = 1000, seed: int = 42):
+def aggregate_recovery_ci(
+    frame: pd.DataFrame,
+    metric: str,
+    n: int = 1000,
+    seed: int = 42,
+    clip: bool = True,
+):
     cols = [metric, f"clean_{metric}", f"degraded_{metric}"]
     values = frame[cols].dropna()
     if len(values) == 0:
@@ -111,7 +120,7 @@ def aggregate_recovery_ci(frame: pd.DataFrame, metric: str, n: int = 1000, seed:
     patched = values[metric].to_numpy(dtype=float)
     clean = values[f"clean_{metric}"].to_numpy(dtype=float)
     degraded = values[f"degraded_{metric}"].to_numpy(dtype=float)
-    mean = compute_aggregate_recovery(patched, clean, degraded)
+    mean = compute_aggregate_recovery(patched, clean, degraded, clip=clip)
 
     rng = np.random.default_rng(seed)
     idx = rng.choice(len(values), (n, len(values)), replace=True)
@@ -120,7 +129,9 @@ def aggregate_recovery_ci(frame: pd.DataFrame, metric: str, n: int = 1000, seed:
     degraded_mean = degraded[idx].mean(axis=1)
     delta = clean_mean - degraded_mean
     eps = np.where(delta >= 0, EPSILON, -EPSILON)
-    boot = np.clip((patched_mean - degraded_mean) / (delta + eps), -5, 5)
+    boot = (patched_mean - degraded_mean) / (delta + eps)
+    if clip:
+        boot = np.clip(boot, -5, 5)
     boot = boot[~np.isnan(boot)]
     if len(boot) == 0:
         return mean, float("nan"), float("nan")
@@ -141,19 +152,58 @@ def _apply_delta_filter(df: pd.DataFrame, min_delta: float = DELTA_THRESHOLD) ->
     return df[(df["clean_top1_probability"] - df["degraded_top1_probability"]).abs() >= min_delta]
 
 
-def _attach_baselines(patched: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
+def _clean_correct_answer_keys(
+    df: pd.DataFrame,
+    answer_bucket: str = "yes",
+) -> pd.DataFrame:
+    """Return (sample_id, severity) pairs where the clean run was correct with answer_bucket."""
+    required = {"sample_id", "severity", "condition", "score"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(
+            "Cannot filter clean-correct answer samples; missing columns: "
+            + ", ".join(sorted(missing))
+        )
+
+    clean = df[df["condition"] == "clean"].copy()
+    if "clean_answer_bucket" in clean.columns:
+        clean_answer = clean["clean_answer_bucket"].astype(str).str.strip().str.lower()
+    elif "clean_answer_text" in clean.columns:
+        clean_answer = clean["clean_answer_text"].astype(str).str.strip().str.lower()
+    else:
+        raise ValueError(
+            "Cannot filter clean-correct answer samples; missing clean_answer_bucket/text column."
+        )
+
+    target = answer_bucket.strip().lower()
+    mask = (clean["score"].astype(float) >= 1.0) & (clean_answer == target)
+    return clean.loc[mask, ["sample_id", "severity"]].drop_duplicates()
+
+
+def _attach_baselines(
+    patched: pd.DataFrame,
+    df: pd.DataFrame,
+    metrics: list[str] | None = None,
+) -> pd.DataFrame:
+    metrics = [m for m in (metrics or METRICS) if m in df.columns]
     for cond in ("clean", "degraded"):
         bl = (
             df[df["condition"] == cond]
-            [["sample_id", "severity"] + METRICS]
-            .rename(columns={m: f"{cond}_{m}" for m in METRICS})
+            [["sample_id", "severity"] + metrics]
+            .rename(columns={m: f"{cond}_{m}" for m in metrics})
         )
         patched = patched.merge(bl, on=["sample_id", "severity"])
     return patched
 
 
-def _add_recovery_columns(patched: pd.DataFrame) -> pd.DataFrame:
-    for m in METRICS:
+def _add_recovery_columns(
+    patched: pd.DataFrame,
+    metrics: list[str] | None = None,
+) -> pd.DataFrame:
+    metrics = metrics or METRICS
+    for m in metrics:
+        if m not in patched.columns or f"clean_{m}" not in patched.columns or f"degraded_{m}" not in patched.columns:
+            continue
         patched[f"recovery_{m}"] = compute_recovery(
             patched[m].values,
             patched[f"clean_{m}"].values,
@@ -163,7 +213,9 @@ def _add_recovery_columns(patched: pd.DataFrame) -> pd.DataFrame:
 
 
 def _prepare_layer_sweep(parquet_path: str, min_delta: float = DELTA_THRESHOLD,
-                         span_label: str | None = None) -> tuple[pd.DataFrame, list[int], list[str], int, int]:
+                         span_label: str | None = None,
+                         metrics: list[str] | None = None,
+                         clean_correct_answer_bucket: str | None = None) -> tuple[pd.DataFrame, list[int], list[str], int, int]:
     """Load and filter layer sweep data. Returns (df, layers, severities, n_total, n_filtered).
 
     When ``span_label`` is None, selects the "final" variant (position_offset == -1
@@ -177,12 +229,16 @@ def _prepare_layer_sweep(parquet_path: str, min_delta: float = DELTA_THRESHOLD,
         patched = patched[patched["position_offset"] == -1]
     else:
         patched = patched[patched["span_label"] == span_label]
-    patched = _attach_baselines(patched, df)
+    if clean_correct_answer_bucket is not None:
+        keys = _clean_correct_answer_keys(df, answer_bucket=clean_correct_answer_bucket)
+        patched = patched.merge(keys, on=["sample_id", "severity"], how="inner")
+    active_metrics = [m for m in (metrics or METRICS) if m in df.columns]
+    patched = _attach_baselines(patched, df, metrics=active_metrics)
 
     n_total = patched["sample_id"].nunique()
     patched = _apply_delta_filter(patched, min_delta=min_delta)
     n_filtered = patched["sample_id"].nunique()
-    patched = _add_recovery_columns(patched)
+    patched = _add_recovery_columns(patched, metrics=active_metrics)
 
     layers = sorted(patched["layer"].dropna().unique().astype(int))
     sevs = [s for s in SEVERITY_ORDER if s in patched["severity"].values]
@@ -632,7 +688,7 @@ def plot_positional_sweep_combined(parquet_path: str, output_dir: Path,
 DATASET_LABELS = {
     "vqa-v2":    "VQA-v2",
     "pope":      "POPE",
-    "coco-qa-vi": "COCO-QA-VI",
+    "coco-qa-vi": "COCO-QA",
     "imagenet-r": "ImageNet-R",
 }
 
@@ -669,7 +725,9 @@ def plot_all_datasets_layer_sweep(
     )
 
     for row, (dataset, parquet_path) in enumerate(dataset_parquets):
-        df, layers, sevs, n_total, n_filtered = _prepare_layer_sweep(parquet_path, min_delta=min_delta)
+        df, layers, sevs, n_total, n_filtered = _prepare_layer_sweep(
+            parquet_path, min_delta=min_delta, metrics=metrics
+        )
 
         for col, metric in enumerate(metrics):
             ax = axes[row, col]
@@ -684,6 +742,7 @@ def plot_all_datasets_layer_sweep(
                 ax.set_ylabel(
                     f"{DATASET_LABELS.get(dataset, dataset)}\n"
                     + ({"top1_probability": "Mean answer confidence",
+                        "clean_answer_probability": "Mean clean-answer confidence",
                         "output_entropy":   "Mean entropy",
                         "score":            "Mean accuracy"}.get(metric, metric)
                        if raw else "Aggregate recovery"),
@@ -776,10 +835,12 @@ def plot_all_datasets_positional_sweep(
 TWO_METRIC_COLORS = {
     "top1_probability": "#2563eb",  # blue
     "score":            "#d97706",  # amber
+    "clean_answer_probability": "#059669",  # green
 }
 TWO_METRIC_LEGEND_LABELS = {
-    "top1_probability": "Confidence recovery",
+    "top1_probability": "Generated-answer confidence recovery",
     "score":            "Accuracy recovery",
+    "clean_answer_probability": "Clean-answer confidence recovery",
 }
 
 
@@ -791,6 +852,7 @@ def _draw_layer_ax_two_metrics(
     show_xlabel: bool,
     show_ylabel: bool = True,
     metrics: list[str] | None = None,
+    clip_recovery: bool = True,
 ) -> list:
     """Draw recovery curves for two metrics overlaid in one axes.
 
@@ -802,8 +864,14 @@ def _draw_layer_ax_two_metrics(
     """
     if metrics is None:
         metrics = ["top1_probability", "score"]
-    linestyles = ["-", "--"]
+    linestyles = ["-", "--", ":"]
     legend_handles = []
+    metrics = [
+        metric for metric in metrics
+        if metric in df.columns
+        and f"clean_{metric}" in df.columns
+        and f"degraded_{metric}" in df.columns
+    ]
     for i, metric in enumerate(metrics):
         color = TWO_METRIC_COLORS.get(metric, "#374151")
         ls = linestyles[i % len(linestyles)]
@@ -811,7 +879,11 @@ def _draw_layer_ax_two_metrics(
             sub = df[df["severity"] == sev]
             ys, los, his = [], [], []
             for layer in layers:
-                m, lo, hi = aggregate_recovery_ci(sub[sub["layer"] == layer], metric)
+                m, lo, hi = aggregate_recovery_ci(
+                    sub[sub["layer"] == layer],
+                    metric,
+                    clip=clip_recovery,
+                )
                 ys.append(m)
                 los.append(lo)
                 his.append(hi)
@@ -835,7 +907,8 @@ def _draw_layer_ax_two_metrics(
         ax.set_xlabel("Layer", fontsize=14)
     ax.grid(alpha=0.3)
     if show_ylabel:
-        ax.set_ylabel("Aggregate recovery", fontsize=14)
+        label = "Aggregate recovery" if clip_recovery else "Aggregate recovery (unclipped)"
+        ax.set_ylabel(label, fontsize=14)
     else:
         ax.set_ylabel("")
 
@@ -854,6 +927,7 @@ def plot_two_metrics_cross_model_layer_sweep(
     min_delta: float = 0.0,
     title: str | None = None,
     metrics: list[str] | None = None,
+    clip_recovery: bool = True,
 ) -> None:
     """2-row × N-col layer-sweep figure overlaying two metrics per cell.
 
@@ -883,13 +957,14 @@ def plot_two_metrics_cross_model_layer_sweep(
             if not missing:
                 try:
                     df, layers, sevs, n_total, n_filtered = _prepare_layer_sweep(
-                        parquet_path, min_delta=min_delta
+                        parquet_path, min_delta=min_delta, metrics=metrics
                     )
                     handles = _draw_layer_ax_two_metrics(
                         ax, df, layers, sevs,
                         show_xlabel=(row == n_models - 1),
                         show_ylabel=(col == 0),
                         metrics=metrics,
+                        clip_recovery=clip_recovery,
                     )
                     if fig_legend_handles is None:
                         fig_legend_handles = handles
@@ -932,6 +1007,313 @@ def plot_two_metrics_cross_model_layer_sweep(
     save(fig, output_dir, output_name + nofilter_suffix)
 
 
+def plot_pope_clean_answer_layer_sweep(
+    parquet_path: str,
+    output_dir: Path,
+    output_name: str = "pope_clean_answer_layer_sweep_unclipped",
+    min_delta: float = 0.0,
+    clip_recovery: bool = False,
+    clean_correct_answer_bucket: str | None = "yes",
+    append_nofilter_suffix: bool = True,
+) -> None:
+    """POPE layer-sweep overlay including recovery of P(clean answer)."""
+    metrics = ["top1_probability", "score", "clean_answer_probability"]
+    df, layers, sevs, n_total, n_filtered = _prepare_layer_sweep(
+        parquet_path,
+        min_delta=min_delta,
+        metrics=metrics,
+        clean_correct_answer_bucket=clean_correct_answer_bucket,
+    )
+    if "clean_answer_probability" not in df.columns:
+        print("  Skipping POPE clean-answer overlay: clean_answer_probability not found.")
+        return
+
+    fig, ax = plt.subplots(1, 1, figsize=(7.5, 5))
+    handles = _draw_layer_ax_two_metrics(
+        ax,
+        df,
+        layers,
+        sevs,
+        show_xlabel=True,
+        show_ylabel=True,
+        metrics=metrics,
+        clip_recovery=clip_recovery,
+    )
+
+    sample_filter_label = ""
+    if clean_correct_answer_bucket is not None:
+        sample_filter_label = (
+            f"clean correct + clean answer {clean_correct_answer_bucket.capitalize()}  ·  "
+        )
+    filter_label = (
+        f"{sample_filter_label}|Δ top-1| ≥ {min_delta} filter  ·  {n_filtered}/{n_total} samples"
+        if min_delta > 0 else f"{sample_filter_label}{n_total} samples"
+    )
+    fig.suptitle(
+        f"POPE Layer Sweep - Accuracy, Expressed Confidence, and Clean-Answer Confidence\n"
+        f"{filter_label}  ·  95% bootstrap CI",
+        fontsize=15,
+        y=1.04,
+    )
+    fig.legend(
+        handles=handles,
+        labels=[h.get_label() for h in handles],
+        loc="upper center",
+        ncol=min(len(handles), 4),
+        frameon=False,
+        fontsize=10,
+        bbox_to_anchor=(0.5, 0.94),
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.88))
+    nofilter_suffix = "_nofilter" if append_nofilter_suffix and min_delta <= 0 else ""
+    save(fig, output_dir, output_name + nofilter_suffix)
+
+
+def _draw_layer_ax_raw_mean_metric(
+    ax: plt.Axes,
+    df: pd.DataFrame,
+    metric: str,
+    layers: list[int],
+    *,
+    color: str,
+    title: str,
+    ylabel: str,
+) -> None:
+    """Draw one raw patched mean metric line over layers."""
+    ys, los, his = [], [], []
+    for layer in layers:
+        vals = df[df["layer"] == layer][metric].to_numpy(dtype=float)
+        mean, lo, hi = bootstrap_ci(vals)
+        ys.append(mean)
+        los.append(lo)
+        his.append(hi)
+
+    display_xs = [layer + 1 for layer in layers]
+    ys = np.asarray(ys, dtype=float)
+    los = np.asarray(los, dtype=float)
+    his = np.asarray(his, dtype=float)
+
+    ax.plot(
+        display_xs,
+        ys,
+        marker="o",
+        linestyle="-",
+        color=color,
+        linewidth=2,
+        markersize=5,
+        zorder=4,
+    )
+    ax.fill_between(display_xs, los, his, color=color, alpha=0.12)
+    ax.set_xticks(display_xs)
+    ax.set_xticklabels([str(x) for x in display_xs], fontsize=8, rotation=45)
+    ax.set_xlabel("Layer", fontsize=14)
+    ax.set_ylabel(ylabel, fontsize=14)
+    ax.set_title(title, fontsize=15, fontweight="bold")
+    ax.grid(alpha=0.3)
+
+
+def plot_pope_clean_correct_yes_three_panel_layer_sweep(
+    parquet_path: str,
+    output_dir: Path,
+    output_name: str = "pope_clean_correct_yes_three_panel_layer_sweep_clipped",
+    min_delta: float = 0.0,
+    clip_recovery: bool = True,
+    append_nofilter_suffix: bool = False,
+) -> None:
+    """POPE clean-correct-Yes three-panel layer sweep.
+
+    Left: aggregate recovery for accuracy and clean-answer confidence.
+    Middle/right: raw patched means for those two metrics.
+    """
+    metrics = ["score", "clean_answer_probability"]
+    df, layers, sevs, n_total, n_filtered = _prepare_layer_sweep(
+        parquet_path,
+        min_delta=min_delta,
+        metrics=metrics,
+        clean_correct_answer_bucket="yes",
+    )
+    if "clean_answer_probability" not in df.columns:
+        print("  Skipping POPE three-panel plot: clean_answer_probability not found.")
+        return
+
+    fig, axes = plt.subplots(1, 3, figsize=(17.5, 5), sharex=False)
+
+    handles = _draw_layer_ax_two_metrics(
+        axes[0],
+        df,
+        layers,
+        sevs,
+        show_xlabel=True,
+        show_ylabel=True,
+        metrics=metrics,
+        clip_recovery=clip_recovery,
+    )
+    axes[0].set_title("Aggregate Recovery", fontsize=15, fontweight="bold")
+    axes[0].legend(
+        handles=[h for h in handles if h.get_label() != "Full recovery (RR=1)"],
+        fontsize=9,
+        frameon=False,
+        loc="best",
+    )
+
+    _draw_layer_ax_raw_mean_metric(
+        axes[1],
+        df,
+        "score",
+        layers,
+        color=TWO_METRIC_COLORS["score"],
+        title="Raw Mean Accuracy",
+        ylabel="Mean accuracy",
+    )
+    axes[1].set_ylim(-0.03, 1.03)
+
+    _draw_layer_ax_raw_mean_metric(
+        axes[2],
+        df,
+        "clean_answer_probability",
+        layers,
+        color=TWO_METRIC_COLORS["clean_answer_probability"],
+        title="Raw Mean Clean-Answer Confidence",
+        ylabel="Mean P(clean answer)",
+    )
+    axes[2].set_ylim(-0.03, 1.03)
+
+    sample_label = (
+        f"|Δ top-1| ≥ {min_delta} filter  ·  {n_filtered}/{n_total} samples"
+        if min_delta > 0 else f"{n_total} samples"
+    )
+    fig.suptitle(
+        f"POPE Layer Sweep - Clean Correct Yes Samples\n"
+        f"{sample_label}  ·  95% bootstrap CI",
+        fontsize=16,
+        y=1.05,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
+    nofilter_suffix = "_nofilter" if append_nofilter_suffix and min_delta <= 0 else ""
+    save(fig, output_dir, output_name + nofilter_suffix)
+
+
+def _prepare_vqa_clean_gt_degraded_zero_layer_sweep(
+    parquet_path: str,
+    min_delta: float = 0.0,
+) -> tuple[pd.DataFrame, list[int], list[str], int, int]:
+    """Load VQA layer-sweep rows where clean score > 0 and degraded score == 0."""
+    metrics = ["score", "clean_answer_probability"]
+    columns = [
+        "sample_id",
+        "severity",
+        "condition",
+        "layer",
+        "position_offset",
+        "span_label",
+        "top1_probability",
+        *metrics,
+    ]
+    df = pd.read_parquet(parquet_path, columns=columns)
+    patched = df[df["condition"] == "patched"].copy()
+    patched = patched[(patched["position_offset"] == -1) & patched["span_label"].isna()]
+
+    clean = (
+        df[df["condition"] == "clean"][["sample_id", "severity", "score"]]
+        .rename(columns={"score": "clean_filter_score"})
+    )
+    degraded = (
+        df[df["condition"] == "degraded"][["sample_id", "severity", "score"]]
+        .rename(columns={"score": "degraded_filter_score"})
+    )
+    keys = clean.merge(degraded, on=["sample_id", "severity"])
+    keys = keys[
+        (keys["clean_filter_score"].astype(float) > 0)
+        & (keys["degraded_filter_score"].astype(float) == 0)
+    ][["sample_id", "severity"]].drop_duplicates()
+
+    patched = patched.merge(keys, on=["sample_id", "severity"], how="inner")
+    active_metrics = ["top1_probability", *metrics]
+    patched = _attach_baselines(patched, df, metrics=active_metrics)
+
+    n_total = patched["sample_id"].nunique()
+    patched = _apply_delta_filter(patched, min_delta=min_delta)
+    n_filtered = patched["sample_id"].nunique()
+    patched = _add_recovery_columns(patched, metrics=metrics)
+
+    layers = sorted(patched["layer"].dropna().unique().astype(int))
+    sevs = [s for s in SEVERITY_ORDER if s in patched["severity"].values]
+    return patched, layers, sevs, n_total, n_filtered
+
+
+def plot_vqa_clean_gt_degraded_zero_three_panel_layer_sweep(
+    parquet_path: str,
+    output_dir: Path,
+    output_name: str = "vqa_clean_gt_degraded_zero_three_panel_layer_sweep_clipped_nofilter",
+    min_delta: float = 0.0,
+    clip_recovery: bool = True,
+) -> None:
+    """VQA three-panel layer sweep for clean score > 0 and degraded score == 0."""
+    metrics = ["score", "clean_answer_probability"]
+    df, layers, sevs, n_total, n_filtered = _prepare_vqa_clean_gt_degraded_zero_layer_sweep(
+        parquet_path,
+        min_delta=min_delta,
+    )
+    if "clean_answer_probability" not in df.columns:
+        print("  Skipping VQA three-panel plot: clean_answer_probability not found.")
+        return
+
+    fig, axes = plt.subplots(1, 3, figsize=(17.5, 5), sharex=False)
+
+    handles = _draw_layer_ax_two_metrics(
+        axes[0],
+        df,
+        layers,
+        sevs,
+        show_xlabel=True,
+        show_ylabel=True,
+        metrics=metrics,
+        clip_recovery=clip_recovery,
+    )
+    axes[0].set_title("Aggregate Recovery", fontsize=15, fontweight="bold")
+    axes[0].legend(
+        handles=[h for h in handles if h.get_label() != "Full recovery (RR=1)"],
+        fontsize=9,
+        frameon=False,
+        loc="best",
+    )
+
+    _draw_layer_ax_raw_mean_metric(
+        axes[1],
+        df,
+        "score",
+        layers,
+        color=TWO_METRIC_COLORS["score"],
+        title="Raw Mean Accuracy",
+        ylabel="Mean accuracy",
+    )
+    axes[1].set_ylim(-0.03, 1.03)
+
+    _draw_layer_ax_raw_mean_metric(
+        axes[2],
+        df,
+        "clean_answer_probability",
+        layers,
+        color=TWO_METRIC_COLORS["clean_answer_probability"],
+        title="Raw Mean Clean-Answer Confidence",
+        ylabel="Mean P(clean answer)",
+    )
+    axes[2].set_ylim(-0.03, 1.03)
+
+    sample_label = (
+        f"|Δ top-1| ≥ {min_delta} filter  ·  {n_filtered}/{n_total} samples"
+        if min_delta > 0 else f"{n_total} samples"
+    )
+    fig.suptitle(
+        "VQA-v2 Layer Sweep - Clean Accuracy > 0, Degraded Accuracy = 0\n"
+        f"{sample_label}  ·  95% bootstrap CI",
+        fontsize=16,
+        y=1.05,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
+    save(fig, output_dir, output_name)
+
+
 def _draw_positional_ax_two_metrics(
     ax: plt.Axes,
     df: pd.DataFrame,
@@ -941,6 +1323,7 @@ def _draw_positional_ax_two_metrics(
     show_xlabel: bool,
     show_ylabel: bool = True,
     metrics: list[str] | None = None,
+    clip_recovery: bool = True,
 ) -> list:
     """Draw confidence and accuracy recovery overlaid by patched position."""
     if metrics is None:
@@ -954,7 +1337,11 @@ def _draw_positional_ax_two_metrics(
             sub = df[df["severity"] == sev]
             ys, los, his = [], [], []
             for cx in canonical_xs:
-                m, lo, hi = aggregate_recovery_ci(sub[sub["canonical_x"] == cx], metric)
+                m, lo, hi = aggregate_recovery_ci(
+                    sub[sub["canonical_x"] == cx],
+                    metric,
+                    clip=clip_recovery,
+                )
                 ys.append(m)
                 los.append(lo)
                 his.append(hi)
@@ -1004,7 +1391,8 @@ def _draw_positional_ax_two_metrics(
     ax.axhline(1, color="#6b7280", linewidth=1.5, linestyle=":", alpha=0.85, zorder=2)
     ax.grid(alpha=0.3)
     if show_ylabel:
-        ax.set_ylabel("Aggregate recovery", fontsize=14)
+        label = "Aggregate recovery" if clip_recovery else "Aggregate recovery (unclipped)"
+        ax.set_ylabel(label, fontsize=14)
     else:
         ax.set_ylabel("")
 
@@ -1026,6 +1414,7 @@ def plot_two_metrics_cross_model_positional_sweep(
     append_nofilter_suffix: bool = True,
     title: str | None = None,
     metrics: list[str] | None = None,
+    clip_recovery: bool = True,
 ) -> None:
     """2-row x N-col positional-sweep figure overlaying confidence and accuracy."""
     if metrics is None:
@@ -1068,6 +1457,7 @@ def plot_two_metrics_cross_model_positional_sweep(
                         show_xlabel=(row == n_models - 1),
                         show_ylabel=(col == 0),
                         metrics=metrics,
+                        clip_recovery=clip_recovery,
                     )
                     if fig_legend_handles is None:
                         fig_legend_handles = handles
@@ -1146,7 +1536,7 @@ def plot_cross_model_layer_sweep(
             missing = not Path(parquet_path).exists()
             if not missing:
                 df, layers, sevs, n_total, n_filtered = _prepare_layer_sweep(
-                    parquet_path, min_delta=min_delta
+                    parquet_path, min_delta=min_delta, metrics=metrics
                 )
                 if fig_legend_handles is None:
                     fig_legend_handles = [

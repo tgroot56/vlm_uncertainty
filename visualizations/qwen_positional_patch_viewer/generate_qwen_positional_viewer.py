@@ -21,7 +21,7 @@ SWEEP_ROOT = Path(
 DATASETS = ["vqa-v2", "coco-qa-vi", "imagenet-r", "pope"]
 DATASET_LABELS = {
     "vqa-v2": "VQA-v2",
-    "coco-qa-vi": "COCO-QA-VI",
+    "coco-qa-vi": "COCO-QA",
     "imagenet-r": "ImageNet-R",
     "pope": "POPE",
 }

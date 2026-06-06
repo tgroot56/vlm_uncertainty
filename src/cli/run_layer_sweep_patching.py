@@ -101,6 +101,29 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--save_clean_answer_probability",
+        action="store_true",
+        help=(
+            "For every clean/degraded/patched row, save the probability assigned "
+            "to the clean run's stripped generated answer tokens."
+        ),
+    )
+    parser.add_argument(
+        "--save_stripped_answer_softmax",
+        action="store_true",
+        help=(
+            "For every row, save full softmax distributions only for the stripped "
+            "generated-answer token positions. This can make outputs large."
+        ),
+    )
+    parser.add_argument(
+        "--stripped_answer_softmax_dtype",
+        type=str,
+        default="float32",
+        choices=["float16", "float32"],
+        help="Storage dtype for stripped-answer softmax payloads.",
+    )
+    parser.add_argument(
         "--verbose", action="store_true",
         help="Print per-(layer, position) patching results for each sample.",
     )
@@ -171,6 +194,9 @@ def main() -> None:
         position_set=args.position_set,
         plot_at_n_samples=args.plot_at_n_samples,
         qwen_prefill_empty_thinking=args.qwen_prefill_empty_thinking,
+        save_clean_answer_probability=args.save_clean_answer_probability,
+        save_stripped_answer_softmax=args.save_stripped_answer_softmax,
+        stripped_answer_softmax_dtype=args.stripped_answer_softmax_dtype,
     )
 
     run_layer_sweep_patching(

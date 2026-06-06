@@ -31,7 +31,7 @@ PAIRS = [
     (["imagenet-r", "pope"], "imagenet_pope"),
 ]
 TITLES = {
-    "vqa_coco": "Patching Layer Sweep - Raw Confidence & Accuracy Recovery - VQA-V2 & COCO-QA-VI",
+    "vqa_coco": "Patching Layer Sweep - Raw Confidence & Accuracy Recovery - VQA-V2 & COCO-QA",
     "imagenet_pope": "Patching Layer Sweep - Raw Confidence & Accuracy Recovery - ImageNet-R & POPE",
 }
 

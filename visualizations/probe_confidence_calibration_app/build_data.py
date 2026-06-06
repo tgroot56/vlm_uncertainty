@@ -24,9 +24,9 @@ ASSET_DIR = OUTPUT_DIR / "assets"
 
 DATASETS = [
     ("vqa-v2", "VQA-v2"),
-    ("coco-qa-vi", "COCO-QA-VI"),
+    ("coco-qa-vi", "COCO-QA"),
     ("imagenet-r", "ImageNet-R"),
-    ("pope/random", "POPE random"),
+    ("pope/random", "POPE"),
 ]
 
 PROBE_FEATURE = "lm_fullspan_lasttok_layer_16"

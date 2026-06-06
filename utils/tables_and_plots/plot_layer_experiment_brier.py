@@ -104,8 +104,8 @@ ENTROPY_FEATURE_NAME = "answer_gen_entropy_mean"
 COMBINED_DATASET_ORDER = ["vqa-v2", "coco-qa-vi", "pope/random", "imagenet-r"]
 COMBINED_DATASET_LABELS = {
     "vqa-v2": "VQA-v2",
-    "coco-qa-vi": "COCO-QA-VI",
-    "pope/random": "POPE Random",
+    "coco-qa-vi": "COCO-QA",
+    "pope/random": "POPE",
     "imagenet-r": "ImageNet-R",
 }
 COMBINED_OUTPUT_PDF = Path("probe_results/layer_experiment/llava_all_datasets_mlp_layer_brier.pdf")
@@ -129,7 +129,7 @@ MODEL_DATASET_CONFIGS: Dict[str, Dict[str, Dict[str, Path | str]]] = {
                 "/projects/prjs2014/llava/layer_experiment/probe_results/pope/random/mlp_layer_comparison/mlp"
             ),
             "output_pdf": Path("probe_results/layer_experiment/llava_pope_random_mlp_layer_brier.pdf"),
-            "title": "LLaVA POPE/random: uncertainty signal across LM layers",
+            "title": "LLaVA POPE: uncertainty signal across LM layers",
         },
         "vqa-v2": {
             "results_root": Path(
@@ -143,7 +143,7 @@ MODEL_DATASET_CONFIGS: Dict[str, Dict[str, Dict[str, Path | str]]] = {
                 "/projects/prjs2014/llava/layer_experiment/probe_results/coco-qa-vi/mlp_layer_comparison/mlp"
             ),
             "output_pdf": Path("probe_results/layer_experiment/llava_coco_qa_vi_mlp_layer_brier.pdf"),
-            "title": "LLaVA COCO-QA-VI: uncertainty signal across LM layers",
+            "title": "LLaVA COCO-QA: uncertainty signal across LM layers",
         },
     },
     "qwen": {
@@ -159,7 +159,7 @@ MODEL_DATASET_CONFIGS: Dict[str, Dict[str, Dict[str, Path | str]]] = {
                 "/projects/prjs2014/qwen/layer_experiment/probe_results/pope/random/mlp_layer_comparison/mlp"
             ),
             "output_pdf": Path("probe_results/layer_experiment/qwen_pope_random_mlp_layer_brier.pdf"),
-            "title": "Qwen POPE/random: uncertainty signal across LM layers",
+            "title": "Qwen POPE: uncertainty signal across LM layers",
         },
         "vqa-v2": {
             "results_root": Path(
@@ -173,7 +173,7 @@ MODEL_DATASET_CONFIGS: Dict[str, Dict[str, Dict[str, Path | str]]] = {
                 "/projects/prjs2014/qwen/layer_experiment/probe_results/coco-qa-vi/mlp_layer_comparison/mlp"
             ),
             "output_pdf": Path("probe_results/layer_experiment/qwen_coco_qa_vi_mlp_layer_brier.pdf"),
-            "title": "Qwen COCO-QA-VI: uncertainty signal across LM layers",
+            "title": "Qwen COCO-QA: uncertainty signal across LM layers",
         },
     },
 }

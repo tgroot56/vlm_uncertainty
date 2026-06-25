@@ -21,6 +21,7 @@ thesis_plot_outputs/
 *.pkl
 *.json
 *.ipynb
+install.cmd
 # Ignore everything inside probe_results
 probe_results/**
 

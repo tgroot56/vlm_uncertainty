@@ -20,38 +20,50 @@ try:
     from .config import (
         DATASET_LABELS,
         DATASETS,
+        GRADIENT_GUIDED_LAYERS,
+        GRADIENT_GUIDED_OBJECTIVE,
+        GRADIENT_GUIDED_OBJECTIVE_NAME,
+        GRADIENT_GUIDED_ROOT,
+        FINAL_PLOT_SAMPLE_LIMITS,
         METRICS_FOR_PLOT,
         MIN_POS_SAMPLES,
         MODEL_SPECS,
         OUTPUT_ROOT,
         POSITIONAL_PATCH_LAYER,
-        QWEN_VISUAL_MIN_FRACTION,
         REPO_ROOT,
+        SOFTMAX_CHANGES_DATASETS,
         SPAN_DISPLAY,
         all_layer_sweep_paths,
         all_parquet_paths,
         layer_sweep_path,
         parquet_path,
         patching_dataset_path,
+        softmax_changes_path,
         supervised_metadata_path,
     )
 except ImportError:  # pragma: no cover - useful when running scripts directly.
     from config import (  # type: ignore
         DATASET_LABELS,
         DATASETS,
+        GRADIENT_GUIDED_LAYERS,
+        GRADIENT_GUIDED_OBJECTIVE,
+        GRADIENT_GUIDED_OBJECTIVE_NAME,
+        GRADIENT_GUIDED_ROOT,
+        FINAL_PLOT_SAMPLE_LIMITS,
         METRICS_FOR_PLOT,
         MIN_POS_SAMPLES,
         MODEL_SPECS,
         OUTPUT_ROOT,
         POSITIONAL_PATCH_LAYER,
-        QWEN_VISUAL_MIN_FRACTION,
         REPO_ROOT,
+        SOFTMAX_CHANGES_DATASETS,
         SPAN_DISPLAY,
         all_layer_sweep_paths,
         all_parquet_paths,
         layer_sweep_path,
         parquet_path,
         patching_dataset_path,
+        softmax_changes_path,
         supervised_metadata_path,
     )
 
@@ -269,6 +281,9 @@ def baseline_output_frame(
         cols.append(conf_col)
     if include_clean_answer_probability and "clean_answer_probability" in raw.columns:
         cols.append("clean_answer_probability")
+    # POPE per-run yes/no probabilities, used by the binary panel display.
+    pope_cols = [c for c in ("pope_yes_probability", "pope_no_probability") if c in raw.columns]
+    cols.extend(c for c in pope_cols if c not in cols)
     base = (
         raw[raw["condition"] == condition][cols]
         .drop_duplicates(["sample_id", "severity"])
@@ -286,6 +301,8 @@ def baseline_output_frame(
         base = base.rename(columns={conf_col: f"{condition}_confidence"})
     if "clean_answer_probability" in base.columns:
         base = base.rename(columns={"clean_answer_probability": f"{condition}_clean_answer_probability"})
+    for pope_col in pope_cols:
+        base = base.rename(columns={pope_col: f"{condition}_{pope_col}"})
     return base
 
 
@@ -298,6 +315,8 @@ def normalize_patched_outputs(patched: pd.DataFrame, conf_col: str) -> pd.DataFr
         "recovery_top1_probability": "confidence_recovery",
         "recovery_clean_answer_probability": "clean_answer_confidence_recovery",
         "clean_answer_probability": "patched_clean_answer_probability",
+        "pope_yes_probability": "patched_pope_yes_probability",
+        "pope_no_probability": "patched_pope_no_probability",
     }
     if conf_col != "top1_probability":
         rename_cols[conf_col] = "patched_confidence"
@@ -327,36 +346,126 @@ def add_clean_answer_confidence_recovery(frame: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
-def _span_minimums(model_label: str, parquet: Path) -> dict[str, int] | None:
-    if "qwen" not in model_label.lower():
-        return None
-    n_clean = pd.read_parquet(parquet, columns=["condition", "sample_id"])
-    n_clean = n_clean[n_clean["condition"] == "clean"]["sample_id"].nunique()
-    return {"visual": max(MIN_POS_SAMPLES, math.ceil(QWEN_VISUAL_MIN_FRACTION * n_clean))}
+SWEEP_SCALAR_COLUMNS = {
+    "sample_id",
+    "severity",
+    "condition",
+    "layer",
+    "token_position",
+    "position_index",
+    "position_offset",
+    "span_label",
+    "predicted_answer",
+    "score",
+    "top1_probability",
+    "output_entropy",
+    "answer_geom_prob",
+    "answer_geom_mean_probability",
+    "clean_answer_probability",
+    "pope_yes_probability",
+    "pope_no_probability",
+}
+
+
+def _read_scalar_sweep(path: Path) -> pd.DataFrame:
+    import pyarrow.parquet as pq
+
+    available = set(pq.ParquetFile(path).schema.names)
+    return pd.read_parquet(path, columns=sorted(SWEEP_SCALAR_COLUMNS & available))
+
+
+def _final_plot_cohort(raw: pd.DataFrame, model_label: str) -> pd.DataFrame:
+    """Match the cohort filter in plot_filtered_clean_answer_cross_model_sweeps.py."""
+    first_ids = list(pd.unique(raw["sample_id"]))[: FINAL_PLOT_SAMPLE_LIMITS[model_label]]
+    limited = raw[raw["sample_id"].isin(first_ids)].copy()
+    clean = (
+        limited[limited["condition"].eq("clean")][["sample_id", "severity", "score"]]
+        .drop_duplicates(["sample_id", "severity"])
+        .rename(columns={"score": "clean_filter_score"})
+    )
+    degraded = (
+        limited[limited["condition"].eq("degraded")][["sample_id", "severity", "score"]]
+        .drop_duplicates(["sample_id", "severity"])
+        .rename(columns={"score": "degraded_filter_score"})
+    )
+    keys = clean.merge(degraded, on=["sample_id", "severity"])
+    keys = keys[
+        keys["clean_filter_score"].astype(float).gt(0)
+        & keys["degraded_filter_score"].astype(float).eq(0)
+    ][["sample_id", "severity"]]
+    return limited.merge(keys, on=["sample_id", "severity"], how="inner")
+
+
+def prepare_positional_sweep_rows(raw: pd.DataFrame) -> pd.DataFrame:
+    patched = raw[raw["condition"].str.startswith("patched", na=False)].copy()
+    active_metrics = [metric for metric in METRICS_FOR_PLOT if metric in raw.columns]
+    if "clean_answer_probability" in raw.columns:
+        active_metrics.append("clean_answer_probability")
+    for condition in ("clean", "degraded"):
+        baseline = (
+            raw[raw["condition"] == condition][["sample_id", "severity"] + active_metrics]
+            .rename(columns={metric: f"{condition}_{metric}" for metric in active_metrics})
+        )
+        patched = patched.merge(baseline, on=["sample_id", "severity"])
+    for metric in active_metrics:
+        patched[f"recovery_{metric}"] = compute_recovery(
+            patched[metric].values,
+            patched[f"clean_{metric}"].values,
+            patched[f"degraded_{metric}"].values,
+        )
+
+    span_starts = (
+        patched.groupby(["sample_id", "span_label"])["token_position"]
+        .min()
+        .reset_index(name="span_start")
+    )
+    patched = patched.merge(span_starts, on=["sample_id", "span_label"])
+    patched["span_rel_pos"] = (patched["token_position"] - patched["span_start"]).astype(int)
+    counts = (
+        patched.groupby(["span_label", "span_rel_pos", "severity"])["sample_id"]
+        .nunique()
+        .reset_index(name="n")
+    )
+    valid = {
+        (span, rel_pos)
+        for (span, rel_pos), count in counts.groupby(["span_label", "span_rel_pos"])["n"].min().items()
+        if count >= MIN_POS_SAMPLES
+    }
+    patched = patched[
+        patched.apply(lambda row: (row["span_label"], row["span_rel_pos"]) in valid, axis=1)
+    ]
+    canonical_rows = []
+    canonical_x = 0
+    for span in ["text_pre", "visual", "question", "assistant_marker"]:
+        positions = sorted(rel_pos for label, rel_pos in valid if label == span)
+        canonical_rows.extend(
+            {"span_label": span, "span_rel_pos": rel_pos, "canonical_x": canonical_x + offset}
+            for offset, rel_pos in enumerate(positions)
+        )
+        canonical_x += len(positions) + 1
+    if not canonical_rows:
+        return patched.iloc[0:0].assign(canonical_x=pd.Series(dtype=int))
+    return patched.merge(
+        pd.DataFrame(canonical_rows),
+        on=["span_label", "span_rel_pos"],
+        how="inner",
+    )
 
 
 @lru_cache(maxsize=16)
 def raw_parquet(model_label: str, dataset: str) -> pd.DataFrame:
     path = parquet_path(model_label, dataset)
-    df = pd.read_parquet(path)
+    df = _final_plot_cohort(_read_scalar_sweep(path), model_label)
     df["sample_id"] = df["sample_id"].astype(str)
     return df
 
 
 @lru_cache(maxsize=16)
 def plot_rows(model_label: str, dataset: str) -> pd.DataFrame:
-    path = parquet_path(model_label, dataset)
-    span_min_pos_samples = _span_minimums(model_label, path)
-    patched, _, _, _, _, _ = _prepare_positional_sweep(
-        str(path),
-        min_delta=0.0,
-        min_pos_samples=MIN_POS_SAMPLES,
-        span_min_pos_samples=span_min_pos_samples,
-    )
-    patched = patched.copy()
+    raw = raw_parquet(model_label, dataset)
+    patched = prepare_positional_sweep_rows(raw)
     patched["sample_id"] = patched["sample_id"].astype(str)
 
-    raw = raw_parquet(model_label, dataset)
     conf_col = confidence_column(raw)
     for cond in ("clean", "degraded"):
         include_clean_answer_probability = f"{cond}_clean_answer_probability" not in patched.columns
@@ -383,7 +492,8 @@ def plot_rows(model_label: str, dataset: str) -> pd.DataFrame:
     patched["sweep_type"] = "positional"
     patched["span_display"] = patched["span_label"].map(lambda x: SPAN_DISPLAY.get(str(x), str(x)))
     patched["patched_token_position"] = patched["token_position"].astype(int)
-    patched["patched_position_index"] = patched["position_index"].astype(int)
+    position_index = patched["position_index"] if "position_index" in patched.columns else patched["token_position"]
+    patched["patched_position_index"] = position_index.astype(int)
     patched["clean_answer_stripped"] = patched["clean_answer"].map(stripped_answer)
     patched["degraded_answer_stripped"] = patched["degraded_answer"].map(stripped_answer)
     patched["patched_answer_stripped"] = patched["patched_answer"].map(stripped_answer)
@@ -415,24 +525,40 @@ def plot_rows(model_label: str, dataset: str) -> pd.DataFrame:
 @lru_cache(maxsize=16)
 def raw_layer_parquet(model_label: str, dataset: str) -> pd.DataFrame:
     path = layer_sweep_path(model_label, dataset)
-    df = pd.read_parquet(path)
+    df = _final_plot_cohort(_read_scalar_sweep(path), model_label)
     df["sample_id"] = df["sample_id"].astype(str)
     return df
 
 
+def prepare_layer_sweep_rows(raw: pd.DataFrame, metrics: list[str]) -> pd.DataFrame:
+    patched = raw[
+        (raw["condition"] == "patched")
+        & (raw["position_offset"] == -1)
+        & raw["span_label"].isna()
+    ].copy()
+    active_metrics = [metric for metric in metrics if metric in raw.columns]
+    for condition in ("clean", "degraded"):
+        baseline = (
+            raw[raw["condition"] == condition][["sample_id", "severity"] + active_metrics]
+            .rename(columns={metric: f"{condition}_{metric}" for metric in active_metrics})
+        )
+        patched = patched.merge(baseline, on=["sample_id", "severity"])
+    for metric in active_metrics:
+        patched[f"recovery_{metric}"] = compute_recovery(
+            patched[metric].values,
+            patched[f"clean_{metric}"].values,
+            patched[f"degraded_{metric}"].values,
+        )
+    return patched
+
+
 @lru_cache(maxsize=16)
 def layer_rows(model_label: str, dataset: str) -> pd.DataFrame:
-    path = layer_sweep_path(model_label, dataset)
     raw = raw_layer_parquet(model_label, dataset)
     layer_metrics = list(METRICS)
     if "clean_answer_probability" in raw.columns and "clean_answer_probability" not in layer_metrics:
         layer_metrics.append("clean_answer_probability")
-    patched, _, _, _, _ = _prepare_layer_sweep(
-        str(path),
-        min_delta=0.0,
-        metrics=layer_metrics,
-    )
-    patched = patched.copy()
+    patched = prepare_layer_sweep_rows(raw, layer_metrics)
     patched["sample_id"] = patched["sample_id"].astype(str)
 
     conf_col = confidence_column(raw)
@@ -526,6 +652,126 @@ def sample_record(model_label: str, dataset: str, sample_id: str) -> dict[str, A
     return records_by_id(model_label, dataset).get(str(sample_id), {})
 
 
+def softmax_storage_status(row: pd.Series) -> dict[str, Any]:
+    """Describe whether a selected sweep row has interactive-ready top-5 data."""
+    import pyarrow.parquet as pq
+
+    sweep_type = str(row.get("sweep_type", ""))
+    model_label = str(row["model"])
+    dataset = str(row["dataset"])
+    path = (
+        layer_sweep_path(model_label, dataset)
+        if sweep_type == "layer"
+        else parquet_path(model_label, dataset)
+    )
+    parquet_file = pq.ParquetFile(path)
+    columns = set(parquet_file.schema.names)
+    explicit_top5 = sorted(column for column in columns if "top5" in column.lower() or "top_5" in column.lower())
+    raw_required = {
+        "stripped_answer_softmax_shape",
+        "stripped_answer_softmax_dtype",
+        "stripped_answer_softmax_bytes",
+    }
+    raw_available = raw_required.issubset(columns)
+    if explicit_top5:
+        status = "materialized"
+        detail = "Explicit top-5 columns are present."
+    elif raw_available:
+        status = "raw_distribution_only"
+        detail = (
+            "Full stripped-answer softmax matrices are stored, but top-5 token IDs/text and "
+            "probabilities are not materialized. The parquet has "
+            f"{parquet_file.num_row_groups} row group(s) and is {path.stat().st_size / (1024 ** 3):.1f} GiB, "
+            "so reading its binary softmax column per UI selection is not interactive-safe."
+        )
+    else:
+        status = "missing"
+        detail = (
+            "This parquet does not contain stripped-answer softmax distributions or explicit top-5 fields."
+        )
+    return {
+        "status": status,
+        "detail": detail,
+        "path": str(path),
+        "explicit_top5_columns": explicit_top5,
+        "raw_available": raw_available,
+    }
+
+
+@lru_cache(maxsize=1)
+def gradient_guided_sample_ids() -> tuple[str, ...]:
+    sample_ids = []
+    for sample_dir in GRADIENT_GUIDED_ROOT.glob("sample_*"):
+        sample_id = sample_dir.name.removeprefix("sample_")
+        if (
+            sample_id.isdigit()
+            and (sample_dir / "metadata.json").is_file()
+            and (sample_dir / "gradient_guided_selected_steps.parquet").is_file()
+            and (sample_dir / GRADIENT_GUIDED_OBJECTIVE).is_dir()
+        ):
+            sample_ids.append(sample_id)
+    return tuple(sorted(sample_ids, key=int))
+
+
+@lru_cache(maxsize=32)
+def gradient_guided_sample_data(sample_id: str) -> dict[str, Any]:
+    sample_dir = GRADIENT_GUIDED_ROOT / f"sample_{sample_id}"
+    with (sample_dir / "metadata.json").open() as f:
+        metadata = json.load(f)
+    prompt_tokens = pd.read_parquet(sample_dir / "prompt_tokens.parquet").copy()
+    selected_steps = pd.read_parquet(sample_dir / "gradient_guided_selected_steps.parquet").copy()
+    if "objective_name" in selected_steps.columns:
+        selected_steps = selected_steps[
+            selected_steps["objective_name"] == GRADIENT_GUIDED_OBJECTIVE_NAME
+        ]
+    selected_steps = selected_steps[
+        selected_steps["requested_layer"].isin(GRADIENT_GUIDED_LAYERS)
+    ].copy()
+    selected_steps["requested_layer"] = selected_steps["requested_layer"].astype(int)
+    selected_steps["patch_order"] = selected_steps["patch_order"].astype(int)
+    selected_steps["token_position"] = selected_steps["token_position"].astype(int)
+    prompt_tokens["token_position"] = prompt_tokens["token_position"].astype(int)
+    return {
+        "sample_dir": sample_dir,
+        "metadata": metadata,
+        "prompt_tokens": prompt_tokens,
+        "selected_steps": selected_steps,
+    }
+
+
+@lru_cache(maxsize=1)
+def softmax_changes_available() -> tuple[tuple[str, str], ...]:
+    """(model_label, dataset) pairs that have a softmax-changes JSON on disk.
+
+    The JSON is produced by ``python -m src.cli.run_softmax_changes`` and lives at
+    ``softmax_changes_path(model_label, dataset)``.
+    """
+    available = []
+    for model_label in MODEL_SPECS:
+        for dataset in SOFTMAX_CHANGES_DATASETS:
+            if softmax_changes_path(model_label, dataset).is_file():
+                available.append((model_label, dataset))
+    return tuple(available)
+
+
+@lru_cache(maxsize=8)
+def softmax_changes_data(model_label: str, dataset: str) -> dict[str, Any]:
+    """Parsed softmax-changes payload for a (model, dataset). Empty dict if absent."""
+    path = softmax_changes_path(model_label, dataset)
+    if not path.is_file():
+        return {}
+    with path.open() as f:
+        return json.load(f)
+
+
+def prompt_text(record: dict[str, Any]) -> str:
+    for key in ("clean_question", "question", "prompt"):
+        value = record.get(key)
+        if value is not None:
+            return str(value).strip()
+    return ""
+
+
 def _correctness_flag(scores: pd.Series, dataset: str) -> pd.Series:
     numeric = pd.to_numeric(scores, errors="coerce").fillna(0.0)
     if dataset == "vqa-v2":
@@ -564,6 +810,11 @@ def add_viewer_helper_columns(frame: pd.DataFrame, model_label: str, dataset: st
         frame["corrupted_clean_answer_probability"] = frame["degraded_clean_answer_probability"]
     else:
         frame["corrupted_clean_answer_probability"] = np.nan
+    for pope_col in ("pope_yes_probability", "pope_no_probability"):
+        degraded_col = f"degraded_{pope_col}"
+        frame[f"corrupted_{pope_col}"] = (
+            frame[degraded_col] if degraded_col in frame.columns else np.nan
+        )
     frame["corrupted_answer_stripped"] = frame["degraded_answer_stripped"]
     if "patch_layer" not in frame.columns:
         frame["patch_layer"] = POSITIONAL_PATCH_LAYER
@@ -617,6 +868,9 @@ def add_viewer_helper_columns(frame: pd.DataFrame, model_label: str, dataset: st
     frame["answer_transition"] = clean_parts + " -> " + corrupted_parts + " -> " + patched_parts
 
     records = records_by_id(model_label, dataset)
+    frame["prompt_text"] = frame["sample_id"].astype(str).map(
+        lambda sample_id: prompt_text(records.get(sample_id, {}))
+    )
     gt_map: dict[str, set[str]] = {}
     for sample_id, record in records.items():
         candidates = ground_truth_candidates(record, dataset)
@@ -657,8 +911,11 @@ VIEWER_HELPER_COLUMNS = {
     "corrupted_answer_pope",
     "patched_answer_pope",
     "corrupted_clean_answer_probability",
+    "corrupted_pope_yes_probability",
+    "corrupted_pope_no_probability",
     "patch_layer",
     "patch_layer_display",
+    "prompt_text",
 }
 
 
@@ -760,6 +1017,10 @@ def clear_runtime_caches() -> None:
     layer_rows.cache_clear()
     all_layer_plot_rows.cache_clear()
     records_by_id.cache_clear()
+    gradient_guided_sample_ids.cache_clear()
+    gradient_guided_sample_data.cache_clear()
+    softmax_changes_available.cache_clear()
+    softmax_changes_data.cache_clear()
     load_processor.cache_clear()
 
 

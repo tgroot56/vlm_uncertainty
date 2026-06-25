@@ -37,10 +37,34 @@ DEVICE="${DEVICE:-cuda}"
 SEVERITY="${SEVERITY:-extreme}"
 LAYER="${LAYER:-17}"
 MAX_SAMPLES="${MAX_SAMPLES:-1000}"
-OUTPUT_TAG="${OUTPUT_TAG:-extreme_answer_confidence}"
+CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-10}"
+MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-15}"
+SAMPLE_VISUAL_EVERY="${SAMPLE_VISUAL_EVERY:-10}"
+INCLUDE_VISUAL_LAST="${INCLUDE_VISUAL_LAST:-10}"
+QWEN_PREFILL_EMPTY_THINKING="${QWEN_PREFILL_EMPTY_THINKING:-1}"
+OUTPUT_TAG="${OUTPUT_TAG:-extreme_answer_confidence_finaltoken}"
+SAVE_CLEAN_ANSWER_PROBABILITY="${SAVE_CLEAN_ANSWER_PROBABILITY:-0}"
+SAVE_STRIPPED_ANSWER_SOFTMAX="${SAVE_STRIPPED_ANSWER_SOFTMAX:-0}"
+STRIPPED_ANSWER_SOFTMAX_DTYPE="${STRIPPED_ANSWER_SOFTMAX_DTYPE:-float32}"
+RETAIN_CHECKPOINT="${RETAIN_CHECKPOINT:-0}"
 
 PATCHING_DATASET="${PATCHING_DATASET:-$VLM_UQ_STORAGE_ROOT/patching/$VLM_SHORT/$DATASET/$DATASET_SPLIT/patching_dataset_$DATASET.json}"
 OUTPUT_DIR="${OUTPUT_DIR:-$VLM_UQ_STORAGE_ROOT/patching/positional_patching_results_including_visual/$VLM_SHORT/$DATASET/$DATASET_SPLIT/$OUTPUT_TAG}"
+
+EXTRA_ARGS=()
+if [[ "$QWEN_PREFILL_EMPTY_THINKING" == "1" ]]; then
+  EXTRA_ARGS+=(--qwen_prefill_empty_thinking)
+  OUTPUT_DIR="${OUTPUT_DIR%/}_qwen_prefill_empty_thinking"
+fi
+if [[ "$SAVE_CLEAN_ANSWER_PROBABILITY" == "1" ]]; then
+  EXTRA_ARGS+=(--save_clean_answer_probability)
+fi
+if [[ "$SAVE_STRIPPED_ANSWER_SOFTMAX" == "1" ]]; then
+  EXTRA_ARGS+=(--save_stripped_answer_softmax --stripped_answer_softmax_dtype "$STRIPPED_ANSWER_SOFTMAX_DTYPE")
+fi
+if [[ "$RETAIN_CHECKPOINT" == "1" ]]; then
+  EXTRA_ARGS+=(--retain_checkpoint)
+fi
 
 srun python -u -m src.cli.run_positional_patching \
   --patching_dataset "$PATCHING_DATASET" \
@@ -48,5 +72,10 @@ srun python -u -m src.cli.run_positional_patching \
   --output_dir "$OUTPUT_DIR" \
   --layer "$LAYER" \
   --severity "$SEVERITY" \
+  --sample_visual_every "$SAMPLE_VISUAL_EVERY" \
+  --include_visual_last "$INCLUDE_VISUAL_LAST" \
   --device "$DEVICE" \
-  --max_samples "$MAX_SAMPLES"
+  --max_samples "$MAX_SAMPLES" \
+  --max_new_tokens "$MAX_NEW_TOKENS" \
+  --checkpoint_every "$CHECKPOINT_EVERY" \
+  "${EXTRA_ARGS[@]}"

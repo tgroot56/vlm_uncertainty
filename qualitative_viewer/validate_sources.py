@@ -7,10 +7,10 @@ from pathlib import Path
 import pandas as pd
 
 try:
-    from .config import DATASET_LABELS, DATASETS, MIN_POS_SAMPLES, MODEL_SPECS, OUTPUT_ROOT, all_parquet_paths
+    from .config import DATASET_LABELS, DATASETS, FINAL_POSITIONAL_PLOT, MIN_POS_SAMPLES, MODEL_SPECS, OUTPUT_ROOT, all_parquet_paths
     from .data_utils import aggregate_recovery_ci, all_plot_rows, raw_parquet
 except ImportError:  # pragma: no cover
-    from config import DATASET_LABELS, DATASETS, MIN_POS_SAMPLES, MODEL_SPECS, OUTPUT_ROOT, all_parquet_paths  # type: ignore
+    from config import DATASET_LABELS, DATASETS, FINAL_POSITIONAL_PLOT, MIN_POS_SAMPLES, MODEL_SPECS, OUTPUT_ROOT, all_parquet_paths  # type: ignore
     from data_utils import aggregate_recovery_ci, all_plot_rows, raw_parquet  # type: ignore
 
 
@@ -122,8 +122,13 @@ def build_report(out_dir: Path) -> tuple[Path, Path, Path]:
     report_path = out_dir / "validation_report.md"
     with report_path.open("w") as f:
         f.write("# Qualitative viewer validation report\n\n")
-        f.write("Target plot: `/projects/prjs2014/patching/filtered_plots/cross_model/sample_cutoff/two_metrics_positional_sweep_nofilter_100_alltokenspans.pdf`\n\n")
-        f.write("The viewer uses the same eight positional-sweep parquet files and applies the same no-filter, `min_pos_samples=100` positional preparation used by `scripts/plot_two_metrics_positional_sweep.py`.\n\n")
+        f.write(f"Target plot: `{FINAL_POSITIONAL_PLOT}`\n\n")
+        f.write(
+            "The viewer uses the same eight positional-sweep parquet families and applies "
+            "the clean-correct/corrupted-incorrect cohort filter and "
+            f"`min_pos_samples={MIN_POS_SAMPLES}` preparation used by "
+            "`scripts/plot_filtered_clean_answer_cross_model_sweeps.py`.\n\n"
+        )
         f.write("## Loaded parquet files\n\n")
         f.write(markdown_table(summary[["model", "dataset", "exists", "clean_samples", "plot_samples", "plot_rows", "parquet"]]))
         f.write("\n\n")
@@ -151,7 +156,7 @@ def build_report(out_dir: Path) -> tuple[Path, Path, Path]:
         f.write("\n\n")
         f.write("## Known limitations logged for requested qualitative features\n\n")
         f.write("- The parquet stores prompt token positions and span labels, but not prompt token strings. The app reconstructs exact token strings from cached Hugging Face processors when available and otherwise displays an explicit fallback warning.\n")
-        f.write("- The parquet does not store a guaranteed visual-token-to-original-pixel map. Visual-token highlights are therefore row-major grid visualizations derived from the visual token count; the app labels this explicitly.\n")
+        f.write("- Visual-token highlights use model-specific geometry reconstructed from cached Hugging Face processors. If exact geometry cannot be recovered, the app does not draw a pixel highlight.\n")
         f.write("- Displayed confidence uses `answer_geom_mean_probability` when present. Recovery values use `top1_probability`, matching the positional-sweep plotting pipeline; in the inspected parquets these columns carry the same answer-level geometric confidence values.\n")
     return report_path, summary_path, aggregate_path
 

@@ -1,0 +1,27 @@
+#!/bin/bash
+
+#SBATCH --partition=rome
+#SBATCH --job-name=qwen_filtered_350_cross_model_plots
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --time=01:00:00
+#SBATCH --output=slurm_outputs/patching/qwen/plot_filtered_350_cross_model_sweeps_%A.out
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+cd "$HOME/vlm_uncertainty/" || exit 1
+
+source activate llava-experiments
+export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
+
+export LLAVA_SAMPLE_LIMIT="${LLAVA_SAMPLE_LIMIT:-1000}"
+export QWEN_SAMPLE_LIMIT="${QWEN_SAMPLE_LIMIT:-350}"
+export QWEN_REQUIRED_RETAINED="${QWEN_REQUIRED_RETAINED:-350}"
+export MIN_POSITION_SAMPLES="${MIN_POSITION_SAMPLES:-10}"
+export QWEN_TAG="${QWEN_TAG:-extreme_clean_answer_confidence_stripped_softmax_filtered350_finaltoken_qwen_prefill_empty_thinking}"
+export POSITIONAL_OUTPUT="${POSITIONAL_OUTPUT:-two_metrics_positional_sweep_clean_answer_confidence_qwen_filtered350_llava1000_n10_unclipped}"
+export LAYER_OUTPUT="${LAYER_OUTPUT:-two_metrics_layer_sweep_clean_answer_confidence_qwen_filtered350_llava1000_unclipped}"
+
+srun python -u scripts/plot_filtered_clean_answer_cross_model_sweeps.py

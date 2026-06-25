@@ -26,6 +26,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 
 DEFAULT_RESULTS_DIR = Path(
@@ -173,6 +174,198 @@ def compute_layer_js(
         )
 
     return pd.DataFrame(rows)
+
+
+def compute_layer_js_streaming(
+    parquet_path: Path,
+    *,
+    position_offset: int = -1,
+    batch_size: int = 64,
+) -> pd.DataFrame:
+    """Compute the same summary as ``compute_layer_js`` with bounded memory.
+
+    Layer-sweep rows are written contiguously per sample/severity, with clean
+    and degraded baselines before patched rows. Streaming by that grouping is
+    important for stripped-softmax parquets that can be tens of gigabytes.
+    """
+    columns = [
+        "sample_id",
+        "severity",
+        "condition",
+        "layer",
+        "position_offset",
+        "stripped_answer_token_count",
+        "stripped_answer_softmax_shape",
+        "stripped_answer_softmax_dtype",
+        "stripped_answer_softmax_bytes",
+    ]
+    parquet = pq.ParquetFile(parquet_path)
+    completed_keys: set[tuple[Any, Any]] = set()
+    current_key: tuple[Any, Any] | None = None
+    clean_vec: np.ndarray | None = None
+    degraded_vec: np.ndarray | None = None
+    js_clean_degraded: dict[int, list[float]] = {}
+    js_clean_patched: dict[int, list[float]] = {}
+    rows_seen = 0
+
+    for batch in parquet.iter_batches(columns=columns, batch_size=batch_size):
+        for row in batch.to_pylist():
+            rows_seen += 1
+            key = (row["sample_id"], row["severity"])
+            if key != current_key:
+                if current_key is not None:
+                    completed_keys.add(current_key)
+                if key in completed_keys:
+                    raise ValueError(
+                        "Streaming JS computation requires contiguous rows per "
+                        f"sample/severity; encountered {key!r} more than once."
+                    )
+                current_key = key
+                clean_vec = None
+                degraded_vec = None
+
+            condition = row["condition"]
+            if condition == "clean" and clean_vec is None:
+                clean_vec = _softmax_vector(row)
+                continue
+            if condition == "degraded" and degraded_vec is None:
+                degraded_vec = _softmax_vector(row)
+                continue
+            if (
+                condition != "patched"
+                or row["position_offset"] != position_offset
+                or clean_vec is None
+                or degraded_vec is None
+            ):
+                continue
+
+            patched_vec = _softmax_vector(row)
+            if patched_vec is None:
+                continue
+            layer = int(row["layer"])
+            js_clean_degraded.setdefault(layer, []).append(
+                js_divergence(clean_vec, degraded_vec)
+            )
+            js_clean_patched.setdefault(layer, []).append(
+                js_divergence(clean_vec, patched_vec)
+            )
+
+        if rows_seen % 10_000 < batch_size:
+            print(f"Processed {rows_seen:,}/{parquet.metadata.num_rows:,} rows")
+
+    layers = sorted(set(js_clean_degraded) | set(js_clean_patched))
+    return pd.DataFrame(
+        [
+            {
+                "layer": layer,
+                "display_layer": layer + 1,
+                "mean_js_clean_corrupted": float(np.mean(js_clean_degraded[layer])),
+                "mean_js_clean_patched": float(np.mean(js_clean_patched[layer])),
+                "n_single_token_examples": len(js_clean_patched[layer]),
+                "position_offset": int(position_offset),
+            }
+            for layer in layers
+        ]
+    )
+
+
+def compute_sample_layer_js_streaming(
+    parquet_path: Path,
+    *,
+    position_offset: int = -1,
+    batch_size: int = 64,
+) -> pd.DataFrame:
+    """Compute per-sample clean-vs-patched JS trajectories with bounded memory."""
+    columns = [
+        "sample_id",
+        "severity",
+        "condition",
+        "layer",
+        "position_offset",
+        "predicted_answer",
+        "score",
+        "stripped_answer_token_count",
+        "stripped_answer_softmax_shape",
+        "stripped_answer_softmax_dtype",
+        "stripped_answer_softmax_bytes",
+    ]
+    parquet = pq.ParquetFile(parquet_path)
+    completed_keys: set[tuple[Any, Any]] = set()
+    current_key: tuple[Any, Any] | None = None
+    clean_vec: np.ndarray | None = None
+    degraded_vec: np.ndarray | None = None
+    clean_answer = ""
+    degraded_answer = ""
+    clean_score = float("nan")
+    degraded_score = float("nan")
+    output_rows: list[dict[str, Any]] = []
+    rows_seen = 0
+
+    for batch in parquet.iter_batches(columns=columns, batch_size=batch_size):
+        for row in batch.to_pylist():
+            rows_seen += 1
+            key = (row["sample_id"], row["severity"])
+            if key != current_key:
+                if current_key is not None:
+                    completed_keys.add(current_key)
+                if key in completed_keys:
+                    raise ValueError(
+                        "Streaming JS computation requires contiguous rows per "
+                        f"sample/severity; encountered {key!r} more than once."
+                    )
+                current_key = key
+                clean_vec = None
+                degraded_vec = None
+                clean_answer = ""
+                degraded_answer = ""
+                clean_score = float("nan")
+                degraded_score = float("nan")
+
+            condition = row["condition"]
+            if condition == "clean" and clean_vec is None:
+                clean_vec = _softmax_vector(row)
+                clean_answer = str(row.get("predicted_answer", ""))
+                clean_score = float(row.get("score", float("nan")))
+                continue
+            if condition == "degraded" and degraded_vec is None:
+                degraded_vec = _softmax_vector(row)
+                degraded_answer = str(row.get("predicted_answer", ""))
+                degraded_score = float(row.get("score", float("nan")))
+                continue
+            if (
+                condition != "patched"
+                or row["position_offset"] != position_offset
+                or clean_vec is None
+                or degraded_vec is None
+            ):
+                continue
+
+            patched_vec = _softmax_vector(row)
+            if patched_vec is None:
+                continue
+            layer = int(row["layer"])
+            output_rows.append(
+                {
+                    "sample_id": str(row["sample_id"]),
+                    "severity": row["severity"],
+                    "layer": layer,
+                    "display_layer": layer + 1,
+                    "js_clean_corrupted": js_divergence(clean_vec, degraded_vec),
+                    "js_clean_patched": js_divergence(clean_vec, patched_vec),
+                    "clean_answer": clean_answer,
+                    "corrupted_answer": degraded_answer,
+                    "patched_answer": str(row.get("predicted_answer", "")),
+                    "clean_score": clean_score,
+                    "corrupted_score": degraded_score,
+                    "patched_score": float(row.get("score", float("nan"))),
+                    "position_offset": int(position_offset),
+                }
+            )
+
+        if rows_seen % 10_000 < batch_size:
+            print(f"Processed {rows_seen:,}/{parquet.metadata.num_rows:,} rows")
+
+    return pd.DataFrame(output_rows)
 
 
 def plot_layer_js(summary: pd.DataFrame, output_dir: Path, output_name: str) -> None:

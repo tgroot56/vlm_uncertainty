@@ -35,14 +35,18 @@ from src.patching.collect_activations import (
     _score_prediction,
 )
 from src.patching.run_patching import (
+    _compute_clean_answer_probability_stats,
     _compute_output_stats,
+    _compute_pope_answer_probability_stats,
+    _compute_stripped_answer_softmax_stats,
     _get_decoder_layers,
     _patched_generate,
     _run_baseline_forward,
+    _stripped_answer_token_ids,
 )
 from src.uq_dataset_generation.token_spans import build_token_spans
 from src.vlm import VLMAdapter, prepare_inputs, prepare_qwen_fused_inputs_embeds
-from src.vlm.adapters import append_qwen_empty_thinking_preamble, qwen_patching_max_new_tokens
+from src.vlm.adapters import append_qwen_empty_thinking_preamble
 
 RECOVERY_EPSILON = 1e-8
 RECOVERY_CLIP = 5.0
@@ -61,9 +65,14 @@ class PositionalPatchingConfig:
     sample_visual_every: int = 10
     include_visual_last: int = 10
     max_new_tokens: int = 4
+    max_new_tokens_override: Optional[int] = None
     checkpoint_every: int = 10
     verbose: bool = False
     qwen_prefill_empty_thinking: bool = False
+    save_clean_answer_probability: bool = False
+    save_stripped_answer_softmax: bool = False
+    stripped_answer_softmax_dtype: str = "float32"
+    retain_checkpoint: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +320,11 @@ def run_positional_patching(
         cfg: experiment configuration.
     """
     os.makedirs(output_dir, exist_ok=True)
-    max_new_tokens = _MAX_NEW_TOKENS.get(cfg.dataset_id, cfg.max_new_tokens)
+    max_new_tokens = (
+        cfg.max_new_tokens_override
+        if cfg.max_new_tokens_override is not None
+        else _MAX_NEW_TOKENS.get(cfg.dataset_id, cfg.max_new_tokens)
+    )
 
     # Determine which severities to run
     if cfg.severity == "all":
@@ -326,12 +339,27 @@ def run_positional_patching(
     if os.path.exists(checkpoint_path):
         with open(checkpoint_path) as f:
             ckpt = json.load(f)
-        completed_ids = set(ckpt.get("completed_ids", []))
+        completed_ids = {str(sample_id) for sample_id in ckpt.get("completed_ids", [])}
         parquet_path = os.path.join(output_dir, "positional_patching_results.parquet")
         if completed_ids and os.path.exists(parquet_path):
             import pandas as pd
             rows = pd.read_parquet(parquet_path).to_dict("records")
         print(f"[pos-patch] Resuming: {len(completed_ids)} samples done.")
+    else:
+        parquet_path = os.path.join(output_dir, "positional_patching_results.parquet")
+        if os.path.exists(parquet_path):
+            import pandas as pd
+            existing = pd.read_parquet(parquet_path)
+            if not existing.empty and "sample_id" in existing.columns:
+                rows = existing.to_dict("records")
+                completed_ids = {
+                    str(sample_id)
+                    for sample_id in existing["sample_id"].dropna().unique().tolist()
+                }
+                print(
+                    f"[pos-patch] Resuming from existing parquet: "
+                    f"{len(completed_ids)} samples done."
+                )
 
     total = len(patching_records)
 
@@ -339,11 +367,21 @@ def run_positional_patching(
     print(f"  Samples:    {total}")
     print(f"  Layer:      {cfg.layer}")
     print(f"  Severities: {severities}")
+    print(f"  Max new tokens: {max_new_tokens}")
     print(
         f"  Visual sampling: every={cfg.sample_visual_every or 'off'}, "
         f"last={cfg.include_visual_last}"
     )
     print(f"  Qwen prefill: {cfg.qwen_prefill_empty_thinking}")
+    print(f"  Clean answer P: {cfg.save_clean_answer_probability}")
+    print(
+        f"  Stripped softmax: {cfg.save_stripped_answer_softmax}"
+        + (
+            f" ({cfg.stripped_answer_softmax_dtype})"
+            if cfg.save_stripped_answer_softmax else ""
+        )
+    )
+    print(f"  Retain checkpoint: {cfg.retain_checkpoint}")
     print(f"  Output:     {output_dir}/")
 
     t0 = time.time()
@@ -379,11 +417,19 @@ def run_positional_patching(
 
         # --- Qwen fast path: pre-compute fused embeds per image (see note in
         # run_layer_sweep_patching.py). 30-40x per-call speedup on Qwen.
-        # Note: fused path uses prepare_inputs internally; empty thinking is
-        # applied inside _run_baseline_forward/_patched_generate via the flag.
+        # The fused bundle must include the same empty-thinking preamble used
+        # for activation extraction so prompt positions remain aligned.
         use_fused = vlm_adapter.family == "qwen"
         clean_fused = (
-            prepare_qwen_fused_inputs_embeds(model, vlm_adapter, processor, clean_image, prompt, device)
+            prepare_qwen_fused_inputs_embeds(
+                model,
+                vlm_adapter,
+                processor,
+                clean_image,
+                prompt,
+                device,
+                qwen_prefill_empty_thinking=cfg.qwen_prefill_empty_thinking,
+            )
             if use_fused else None
         )
 
@@ -391,8 +437,7 @@ def run_positional_patching(
         clean_fwd = _run_baseline_forward(
             model=model, processor=processor, device=device,
             vlm_adapter=vlm_adapter, image=clean_image, prompt=prompt,
-            max_new_tokens=qwen_patching_max_new_tokens(vlm_adapter, max_new_tokens)
-            if cfg.qwen_prefill_empty_thinking else max_new_tokens,
+            max_new_tokens=max_new_tokens,
             fused_bundle=clean_fused,
             qwen_prefill_empty_thinking=cfg.qwen_prefill_empty_thinking,
         )
@@ -401,6 +446,39 @@ def run_positional_patching(
             clean_fwd["gen_step_logits"], clean_fwd.get("gen_ids"), processor
         )
         clean_score = _score_prediction(cfg.dataset_id, clean_fwd["raw_text"], record)
+        clean_answer_text = clean_fwd["raw_text"]
+        clean_answer_token_ids = _stripped_answer_token_ids(
+            clean_fwd.get("gen_ids"), processor
+        )
+
+        def _extra_answer_stats(fwd: Dict[str, Any]) -> Dict[str, Any]:
+            extra: Dict[str, Any] = {}
+            if cfg.dataset_id == "pope":
+                extra.update(
+                    _compute_pope_answer_probability_stats(
+                        fwd["gen_step_logits"], processor, clean_answer_text
+                    )
+                )
+            if cfg.save_clean_answer_probability:
+                extra.update(
+                    _compute_clean_answer_probability_stats(
+                        fwd["gen_step_logits"],
+                        fwd.get("gen_ids"),
+                        processor,
+                        clean_answer_text=clean_answer_text,
+                        clean_answer_token_ids=clean_answer_token_ids,
+                    )
+                )
+            if cfg.save_stripped_answer_softmax:
+                extra.update(
+                    _compute_stripped_answer_softmax_stats(
+                        fwd["gen_step_logits"],
+                        fwd.get("gen_ids"),
+                        processor,
+                        dtype=cfg.stripped_answer_softmax_dtype,
+                    )
+                )
+            return extra
 
         # --- For each severity ---
         for pert in record.get("visual_perturbations", []):
@@ -414,7 +492,15 @@ def run_positional_patching(
 
             blurred_image = Image.open(img_path).convert("RGB")
             blurred_fused = (
-                prepare_qwen_fused_inputs_embeds(model, vlm_adapter, processor, blurred_image, prompt, device)
+                prepare_qwen_fused_inputs_embeds(
+                    model,
+                    vlm_adapter,
+                    processor,
+                    blurred_image,
+                    prompt,
+                    device,
+                    qwen_prefill_empty_thinking=cfg.qwen_prefill_empty_thinking,
+                )
                 if use_fused else None
             )
 
@@ -422,8 +508,7 @@ def run_positional_patching(
             deg_fwd = _run_baseline_forward(
                 model=model, processor=processor, device=device,
                 vlm_adapter=vlm_adapter, image=blurred_image, prompt=prompt,
-                max_new_tokens=qwen_patching_max_new_tokens(vlm_adapter, max_new_tokens)
-                if cfg.qwen_prefill_empty_thinking else max_new_tokens,
+                max_new_tokens=max_new_tokens,
                 fused_bundle=blurred_fused,
                 qwen_prefill_empty_thinking=cfg.qwen_prefill_empty_thinking,
             )
@@ -443,6 +528,7 @@ def run_positional_patching(
                 "predicted_answer": clean_fwd["raw_text"],
                 "score": clean_score,
                 **clean_stats,
+                **_extra_answer_stats(clean_fwd),
             })
             rows.append({
                 "sample_id": sample_id,
@@ -454,6 +540,7 @@ def run_positional_patching(
                 "predicted_answer": deg_fwd["raw_text"],
                 "score": deg_score,
                 **deg_stats,
+                **_extra_answer_stats(deg_fwd),
             })
 
             # --- Per-position patching ---
@@ -464,8 +551,7 @@ def run_positional_patching(
                     model=model, processor=processor, device=device,
                     vlm_adapter=vlm_adapter, image=blurred_image,
                     prompt=prompt,
-                    max_new_tokens=qwen_patching_max_new_tokens(vlm_adapter, max_new_tokens)
-                    if cfg.qwen_prefill_empty_thinking else max_new_tokens,
+                    max_new_tokens=max_new_tokens,
                     layer_idx=patch_decoder_idx,
                     positions=[pos],
                     clean_activations=clean_act,
@@ -491,6 +577,7 @@ def run_positional_patching(
                     "predicted_answer": patched_fwd["raw_text"],
                     "score": patched_score,
                     **patched_stats,
+                    **_extra_answer_stats(patched_fwd),
                 })
 
                 if cfg.verbose:
@@ -514,10 +601,15 @@ def run_positional_patching(
                   f"({elapsed:.0f}s, {rate:.1f} samples/s)")
 
     # Final save
-    _save_results(rows, output_dir, checkpoint_path=None, completed_ids=completed_ids)
+    _save_results(
+        rows,
+        output_dir,
+        checkpoint_path=checkpoint_path if cfg.retain_checkpoint else None,
+        completed_ids=completed_ids,
+    )
 
     # Clean up checkpoint
-    if os.path.exists(checkpoint_path):
+    if not cfg.retain_checkpoint and os.path.exists(checkpoint_path):
         os.remove(checkpoint_path)
 
     elapsed = time.time() - t0
@@ -527,12 +619,28 @@ def run_positional_patching(
     _print_positional_summary(rows, output_dir)
 
     from pathlib import Path as _Path
-    from src.cli.plot_sweep_filtered import plot_positional_sweep_combined
+    from src.cli.plot_sweep_filtered import (
+        plot_positional_sweep_combined,
+        plot_two_metrics_cross_model_positional_sweep,
+    )
 
     parquet_path = os.path.join(output_dir, "positional_patching_results.parquet")
     plot_positional_sweep_combined(parquet_path, _Path(output_dir), raw=False)
     plot_positional_sweep_combined(parquet_path, _Path(output_dir), raw=True)
     plot_positional_sweep_combined(parquet_path, _Path(output_dir), raw=True, min_delta=0.0)
+    if cfg.save_clean_answer_probability:
+        model_label = (
+            "Qwen3.5-9B" if vlm_adapter.family == "qwen" else "LLaVA-1.5-7B"
+        )
+        plot_two_metrics_cross_model_positional_sweep(
+            model_entries=[(model_label, {cfg.dataset_id: parquet_path})],
+            datasets=[cfg.dataset_id],
+            output_dir=_Path(output_dir),
+            output_name="positional_sweep_clean_answer_confidence_accuracy_recovery",
+            min_delta=0.0,
+            metrics=["clean_answer_probability", "score"],
+            title="Positional Sweep - Clean-Answer Confidence & Accuracy Recovery",
+        )
 
 
 # ---------------------------------------------------------------------------

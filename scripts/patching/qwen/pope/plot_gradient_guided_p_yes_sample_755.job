@@ -1,0 +1,27 @@
+#!/bin/bash
+
+#SBATCH --partition=rome
+#SBATCH --job-name=pope_qwen_grad_plot_755
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --time=01:00:00
+#SBATCH --output=slurm_outputs/patching/qwen/pope/plot_gradient_guided_p_yes_sample_755_%j.out
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+cd "$HOME/vlm_uncertainty/" || exit 1
+source activate llava-experiments
+
+export VLM_UQ_STORAGE_ROOT="${VLM_UQ_STORAGE_ROOT:-/projects/prjs2014}"
+export MPLCONFIGDIR="${TMPDIR:-/tmp}/matplotlib-$SLURM_JOB_ID"
+mkdir -p "$MPLCONFIGDIR" slurm_outputs/patching/qwen/pope
+
+ROOT="$VLM_UQ_STORAGE_ROOT/patching/gradient_guided_token_patching/Qwen_Qwen3-5-9B/pope/random"
+
+python -u scripts/plot_gradient_guided_objective_contributions.py \
+  --root "$ROOT" \
+  --sample_ids 755 \
+  --objectives maximize_p_yes \
+  --output_dir "$ROOT/objective_contribution_summary_sample_755"

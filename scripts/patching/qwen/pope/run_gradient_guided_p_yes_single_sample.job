@@ -1,0 +1,56 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=pope_qwen_gg_p_yes
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=12:00:00
+#SBATCH --output=slurm_outputs/patching/qwen/pope/run_gradient_guided_p_yes_single_%j.out
+
+# Single-sample Qwen gradient-guided token patching (maximize_p_yes).
+# Settings mirror run_gradient_guided_p_yes_sample_755.job /
+# run_gradient_guided_p_yes_10_samples.job exactly; the only adaptation is
+# running one SAMPLE_ID per job so samples run concurrently.
+# Submit with: sbatch --export=SAMPLE_ID=<id> <this script>
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+cd "$HOME/vlm_uncertainty/" || exit 1
+source activate llava-experiments
+
+export VLM_UQ_STORAGE_ROOT="${VLM_UQ_STORAGE_ROOT:-/projects/prjs2014}"
+export VLM_UQ_USER_STORAGE_ROOT="${VLM_UQ_USER_STORAGE_ROOT:-$VLM_UQ_STORAGE_ROOT/$USER}"
+export HF_HOME="${HF_HOME:-$VLM_UQ_USER_STORAGE_ROOT/hf_home}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_datasets}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/hf_transformers}"
+export VLM_UQ_PREP_CACHE="${VLM_UQ_PREP_CACHE:-$VLM_UQ_USER_STORAGE_ROOT/vlm_uq_prepared_cache}"
+
+mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$TRANSFORMERS_CACHE" "$VLM_UQ_PREP_CACHE"
+mkdir -p slurm_outputs/patching/qwen/pope
+
+SAMPLE_ID="${SAMPLE_ID:?Set SAMPLE_ID, e.g. sbatch --export=SAMPLE_ID=1291 run_gradient_guided_p_yes_single_sample.job}"
+
+VLM_ID="Qwen/Qwen3.5-9B"
+VLM_SHORT="Qwen_Qwen3-5-9B"
+ROOT="$VLM_UQ_STORAGE_ROOT/patching/gradient_guided_token_patching/$VLM_SHORT/pope/random"
+PATCHING_DATASET="$VLM_UQ_STORAGE_ROOT/patching/$VLM_SHORT/pope/random/patching_dataset_pope.json"
+
+echo "sample=$SAMPLE_ID objective=maximize_p_yes"
+srun python -u -m src.cli.run_gradient_guided_token_patching \
+  --patching_dataset "$PATCHING_DATASET" \
+  --vlm "$VLM_ID" \
+  --output_dir "$ROOT/sample_$SAMPLE_ID" \
+  --sample_id "$SAMPLE_ID" \
+  --severity extreme \
+  --layers $(seq -s ' ' 1 32) \
+  --max_patches 10 \
+  --visual_top_k 64 \
+  --objectives maximize_p_yes \
+  --early_stop_window 3 \
+  --early_stop_abs_sum_threshold 0.002 \
+  --require_corrupted_no \
+  --qwen_prefill_empty_thinking \
+  --device cuda

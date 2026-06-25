@@ -83,6 +83,10 @@ def parse_args() -> argparse.Namespace:
         "--checkpoint_every", type=int, default=10,
     )
     parser.add_argument(
+        "--max_new_tokens", type=int, default=None,
+        help="Override the dataset-specific generation budget.",
+    )
+    parser.add_argument(
         "--verbose", action="store_true",
         help="Print per-position patching results for each sample",
     )
@@ -97,6 +101,34 @@ def parse_args() -> argparse.Namespace:
             "answers directly (comparable to LLaVA). Adds 4 new positions to the "
             "assistant_marker span and shifts position -1 to the final preamble token."
         ),
+    )
+    parser.add_argument(
+        "--save_clean_answer_probability",
+        action="store_true",
+        help=(
+            "For every clean/degraded/patched row, save the probability assigned "
+            "to the clean run's stripped generated answer tokens."
+        ),
+    )
+    parser.add_argument(
+        "--save_stripped_answer_softmax",
+        action="store_true",
+        help=(
+            "For every row, save full softmax distributions only for the stripped "
+            "generated-answer token positions. This can make outputs large."
+        ),
+    )
+    parser.add_argument(
+        "--stripped_answer_softmax_dtype",
+        type=str,
+        default="float32",
+        choices=["float16", "float32"],
+        help="Storage dtype for stripped-answer softmax payloads.",
+    )
+    parser.add_argument(
+        "--retain_checkpoint",
+        action="store_true",
+        help="Keep the final checkpoint JSON so the run can be extended later.",
     )
     return parser.parse_args()
 
@@ -158,9 +190,14 @@ def main() -> None:
         severity=args.severity,
         sample_visual_every=args.sample_visual_every,
         include_visual_last=args.include_visual_last,
+        max_new_tokens_override=args.max_new_tokens,
         checkpoint_every=args.checkpoint_every,
         verbose=args.verbose,
         qwen_prefill_empty_thinking=args.qwen_prefill_empty_thinking,
+        save_clean_answer_probability=args.save_clean_answer_probability,
+        save_stripped_answer_softmax=args.save_stripped_answer_softmax,
+        stripped_answer_softmax_dtype=args.stripped_answer_softmax_dtype,
+        retain_checkpoint=args.retain_checkpoint,
     )
 
     run_positional_patching(

@@ -21,6 +21,10 @@ LLAVA_PS = _ROOT / "positional_patching_results_including_visual/llava-hf_llava-
 QWEN_PS = _ROOT / "positional_patching_results_including_visual/Qwen_Qwen3-5-9B"
 
 DATASETS = ["vqa-v2", "coco-qa-vi", "imagenet-r", "pope"]
+DATASET_SPLITS = [
+    ("vqa_coco", ["vqa-v2", "coco-qa-vi"]),
+    ("imagenet_pope", ["imagenet-r", "pope"]),
+]
 
 LLAVA_SUBDIR = "extreme_answer_confidence"
 QWEN_SUBDIR = "extreme_answer_confidence_finaltoken_qwen_prefill_empty_thinking"
@@ -55,5 +59,17 @@ plot_two_metrics_cross_model_positional_sweep(
     append_nofilter_suffix=False,
     clip_recovery=False,
 )
+
+for split_name, datasets in DATASET_SPLITS:
+    plot_two_metrics_cross_model_positional_sweep(
+        model_entries=model_entries,
+        datasets=datasets,
+        output_dir=CROSS_OUT,
+        output_name=f"two_metrics_positional_sweep_nofilter_100_alltokenspans_unclipped_{split_name}",
+        min_delta=0.0,
+        min_pos_samples=100,
+        append_nofilter_suffix=False,
+        clip_recovery=False,
+    )
 
 print("\nDone.")

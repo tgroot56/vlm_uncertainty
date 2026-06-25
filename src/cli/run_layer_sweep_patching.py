@@ -85,6 +85,10 @@ def parse_args() -> argparse.Namespace:
         help="Save a checkpoint every K completed samples.",
     )
     parser.add_argument(
+        "--max_new_tokens", type=int, default=None,
+        help="Override the dataset-specific generation budget.",
+    )
+    parser.add_argument(
         "--plot_at_n_samples", type=int, default=None,
         help=(
             "If set, write a parquet + plot snapshot into "
@@ -189,6 +193,7 @@ def main() -> None:
         dataset_id=dataset_id,
         n_prompt_tokens=args.n_prompt_tokens,
         severity=args.severity,
+        max_new_tokens_override=args.max_new_tokens,
         checkpoint_every=args.checkpoint_every,
         verbose=args.verbose,
         position_set=args.position_set,

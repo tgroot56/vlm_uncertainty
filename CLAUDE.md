@@ -75,7 +75,7 @@ There are no automated tests; experiments are validated by examining outputs and
 ### Supported VLMs and Datasets
 
 - **VLMs**: LLaVA-1.5/1.6 (7B), Qwen-VL, Molmo, BLIP2-Flan-T5
-- **Datasets**: VQA-v2, POPE, COCO-QA-VI, ImageNet-R
+- **Datasets**: VQA-v2, POPE (always use random split), COCO-QA-VI, ImageNet-R
 
 ### Feature Types Extracted
 
@@ -85,56 +85,222 @@ Hidden states are extracted by span type and layer index, e.g.:
 - `lm_question_mean_layer_24` — LM hidden states over question token span
 - Answer generation statistics: token probabilities, entropy, logits
 
-## Thesis Storyline
+# Project Summary
 
-The thesis tells a three-act story: **discovery → mechanism → verification**.
+## Purpose
 
-### Act 1: Probing — Hidden states encode correctness better than outputs (MAIN CLAIM)
-MLP probes on hidden-state activations (final prompt token, answer span) outperform output-level baselines (softmax entropy, top-1 probability) at predicting model correctness. Correctness is maximally decodable in middle layers. This establishes an **information gap**: the model internally "knows" more about its own reliability than it expresses in the output distribution.
+This repository studies uncertainty and correctness in vision-language models
+(VLMs). The main models are LLaVA-1.5-7B and Qwen3.5-9B, with support elsewhere
+for Molmo and BLIP2. The work connects hidden-state probing, activation
+patching, output confidence, and qualitative inspection across VQA-v2,
+COCO-QA-VI, ImageNet-R, and POPE.
 
-### Act 2: Activation Patching — Two distinct signals explain the gap (MECHANISM)
-Layer sweep on clean-vs-blurred pairs reveals why the gap exists:
-- **Grounded correctness** (middle-to-late layers ~15–28): patching restores both accuracy AND confidence together. Genuine task-relevant processing.
-- **Commitment confidence** (final layer ~31): patching restores confidence WITHOUT accuracy. The model "commits" regardless of evidence quality.
+The Streamlit qualitative visualizer lives in `qualitative_viewer/`. It makes
+sample-level patching behavior inspectable and exports thesis-ready figures.
 
-The final layer's commitment operation compresses and distorts the grounded signal, creating the information gap observed in Act 1. Effect is localized entirely to the final prompt token (offset −1).
+## Main Probing Experiments
 
-### Act 3: Mismatch Analysis — Verifying the two-signal account (VERIFICATION)
-The two-signal dissociation predicts that overconfident errors (hallucinations) should occur specifically when commitment confidence exceeds grounded correctness. The mismatch analysis tests this falsifiable prediction: if high-mismatch samples have elevated error rates, the mechanistic account is validated. This is a **verification experiment**, not a deployment-ready tool.
+- Linear, MLP, and component-attention probes predict answer correctness from
+  hidden representations.
+- Features include vision states and language-model states pooled over visual,
+  question, final-prompt-token, and answer spans.
+- Probe quality is compared with output-level confidence baselines using AUROC,
+  Brier score, calibration, and mismatch analyses.
+- The main finding being tested is that middle-layer hidden states encode
+  correctness better than the expressed output distribution.
 
-## Current Experiment Plan
+Key code:
 
-### Immediate: Mismatch Sanity Check
-Split existing evaluation samples into a 2×2 grid (output confident vs. uncertain × probe predicts correct vs. incorrect). Check if the "overconfident hallucination" cell (high output confidence, low probe score, incorrect answer) has elevated error rates vs. the base rate. This uses existing probe results and output confidence data — no new model runs needed.
+- `src/probe/`: probe models, training, data, and metrics.
+- `src/pipelines/train_probe.py`: probe training pipeline.
+- `src/cli/evaluate_msts_probes.py`: MSTS/OOD evaluation.
+- `scripts/probing/`, `scripts/generalization/`, and model-specific scripts:
+  production SLURM jobs and analysis plots.
 
-- Implemented: `src.cli.run_mismatch_sanity_check` joins the best middle-layer probe (by AUROC or Brier via `--selection_metric`) with raw `answer_gen_entropy_mean` per test sample, median-splits both into A/B/C/D cells, reports chi²/Fisher p-values, and writes a per-sample CSV. Plots: `plot_signed_mismatch` (signed mismatch `m = conf_pct − probe_pct` with Wilson CIs) and `plot_mismatch_strata` (within-stratum curves that remove A↔D confounding).
-- Heatmap plot (`plot_mismatch_heatmap`): 10×10 error-rate grid over (probe_percentile × confidence_percentile), `origin="lower"` so the four cells sit in expected corners — **A** top-right (both high, lowest error), **B** top-left (output confident, probe disagrees → overconfident hallucination region), **C** bottom-right (output uncertain, probe disagrees → undercommitted), **D** bottom-left (both low, highest error). RdYlGn_r colormap (red = high error), cells annotated with error rate + n, median-split reference lines, sibling `*_heatmap_cells.csv`.
+## Main Activation-Patching Experiments
 
-### Priority TODO (ordered by narrative impact)
-1. **Mismatch analysis (full)** — Percentile-rank mismatch metric, AUROC comparison (mismatch vs. probe-only vs. confidence-only), error rate by mismatch decile. Compute recovery ratio: (AUROC_mismatch − AUROC_output) / (AUROC_probe − AUROC_output) to quantify how much of the information gap the mismatch recovers. ~1–2 weeks.
-2. **Patching on Qwen3.5-VL** — Replicate the two-signal finding on a second model. Critical for generalization of the central mechanistic claim. ~1 week.
-3. **MSTS out-of-distribution evaluation** — Supervisor request. Tests probe generalization on unseen distribution. ~3–5 days.
-4. **Probing on Molmo-2** — Nice-to-have third model for probing. Cut first if time is short. ~3–5 days.
-5. **Writing** — Remaining time.
+- Clean/degraded patching datasets pair a clean image with blurred
+  perturbations.
+- Layer sweeps patch the clean final-prompt-token activation into a degraded
+  run across hidden-state layers.
+- Positional sweeps patch individual prompt positions at a fixed layer,
+  including visual tokens.
+- Gradient-guided patching selects prompt tokens by their gradient-estimated
+  contribution to a target objective and applies them in ranked order.
+- Recovery is measured relative to clean and degraded baselines:
+  `(patched - degraded) / (clean - degraded + epsilon)`.
 
-### Key Conceptual Distinctions
-- **Correctness ≠ confidence.** Probes predict binary correctness (will the model be right?), not confidence (how peaked is the output?).
-- **Grounded correctness ≠ commitment confidence.** The former is evidence-based (mid layers), the latter is the model's decision to commit (final layer). Their divergence predicts hallucinations.
-- **The mismatch analysis is verification, not a tool.** It tests whether the two-signal mechanistic account makes correct predictions about real model failures.
+Key code:
 
-### Positional Sweep Plotting Notes (`src/cli/plot_sweep_filtered.py`)
-- Positional sweep plots use **span-relative positions** (`token_position − per-sample span start`) so that e.g. all assistant_marker token 0s align across samples regardless of question length; positions with fewer than 10 samples per severity are dropped.
-- The x-axis shows span names ("Text pre", "Visual tokens", "Question", "Assistant marker") centered over each shaded region instead of numeric token indices, with vertical dividers at span boundaries.
-- Supported severities: `mild`, `moderate`, `severe`, `extreme`. Missing a severity from `SEVERITY_ORDER` / `SEVERITY_COLORS` silently produces empty plots (filtered out as "not in severity list"); add any new severity to both maps.
-- The runner modules (`src/patching/run_{layer_sweep,positional}_patching.py`) now call `plot_{layer_sweep,positional_sweep}_combined` from `plot_sweep_filtered.py` at the end of each job, emitting both `raw` (clean/degraded baselines + patched means) and recovery-ratio variants. `--plot_only` mode in the two CLIs does the same.
+- `src/patching/build_dataset.py`
+- `src/patching/collect_activations.py`
+- `src/patching/run_layer_sweep_patching.py`
+- `src/patching/run_positional_patching.py`
+- `src/patching/run_gradient_guided_token_patching.py`
+- `src/cli/plot_sweep_filtered.py`
+- `scripts/plot_filtered_clean_answer_cross_model_sweeps.py`
 
-### Extreme-Sigma (σ=50) Patching Tests
-A fourth severity level `extreme` (fixed `sigma=50.0` = `src.patching.calibrate_blur.EXTREME_BLUR_SIGMA`) tests the patching effect when the visual signal is collapsed to near-uniform colour. It is an *uncalibrated* level, appended to existing patching datasets rather than re-built:
-- **Extend existing datasets**: `python -m src.cli.extend_patching_dataset_extreme` (idempotent; skips samples that already have an `extreme` entry). Job file: `scripts/patching/llava/extend_dataset_extreme.job` (env override `EXTREME_SIGMA`, default 50.0). Writes blurred PNGs to `<dataset_dir>/blurred_images/<sid>_sigma50.0.png` and patches metadata + sidecar `calibration.json`.
-- **Run sweeps**: `scripts/patching/llava/run_{layer_sweep,positional}_patching_extreme.job` with `SEVERITY=extreme`; outputs land in `.../{layer_sweep_results,positional_patching_results_including_visual}/<vlm>/<dataset>/extreme/` subdirs.
-- **Per-dataset job copies** live under `scripts/patching/llava/<dataset>/{extend_dataset_extreme,run_layer_sweep_patching_extreme,run_positional_patching_extreme}.job` with `DATASET` baked in and slurm outputs namespaced to `slurm_outputs/patching/llava/<dataset>/`.
+## Confidence And Accuracy Tracking
 
-**Qualitative helper**: `python -m src.cli.plot_qualitative_extreme` (defaults to coco-qa-vi/extreme) produces `correct_under_extreme_blur.{pdf,png}` and `top1_score_decoupling.{pdf,png}` in the `extreme/qualitative/` subdir.
+The current sweep pipeline stores and visualizes dataset-specific correctness,
+generated-answer confidence, and clean-answer confidence. Clean-answer
+confidence is the probability assigned to the clean run's answer under clean,
+corrupted, and patched conditions. The qualitative viewer exposes accuracy
+recovery, generated-answer confidence recovery, and clean-answer confidence
+recovery for the selected intervention.
+
+The clean-answer fields are produced by
+`src/patching/run_patching.py::_compute_clean_answer_probability_stats` and are
+enabled by the layer/positional runner option
+`--save_clean_answer_probability`.
+
+## Qualitative Visualizer
+
+Run the app with:
+
+```bash
+qualitative_viewer/run_app.sh 8501
+```
+
+Implemented views:
+
+- Positional sweep: clean, corrupted, and patched three-panel comparison.
+- Layer sweep: clean, corrupted, and patched three-panel comparison.
+- Gradient-guided LLaVA POPE view: four aligned panels for layers 1, 11, 15,
+  and 18.
+- Prompt token reconstruction and highlighting.
+- Visual-token-to-image-patch projection for LLaVA and Qwen.
+- Clean image, corrupted image, patched output, confidence, correctness,
+  recovery metrics, prompt filtering, and PNG/PDF exports.
+
+The gradient-guided view reads:
+
+`/projects/prjs2014/patching/gradient_guided_token_patching/llava-hf_llava-1-5-7b-hf/pope/random/sample_<id>/obj_yes`
+
+It overlays numbered visual-token patches on the clean image, numbers patched
+text tokens in the prompt, shows clean/corrupted/patched answers and
+confidences, and summarizes incremental patch increases.
+
+## Final Sweep Sources
+
+The qualitative layer and positional views now use the same parquet families
+and filtering logic as `scripts/plot_filtered_clean_answer_cross_model_sweeps.py`.
+They take the first 100 source sample IDs per model/dataset, keep
+clean-correct/corrupted-incorrect pairs, and use a minimum positional support
+of 35.
+
+Final layer figure:
+
+`/projects/prjs2014/patching/layer_sweep_results/two_metrics_layer_sweep_clean_answer_confidence_clean_correct_corrupted_incorrect_unclipped.pdf`
+
+Final positional figure:
+
+`/projects/prjs2014/patching/positional_patching_results_including_visual/two_metrics_positional_sweep_clean_answer_confidence_clean_correct_corrupted_incorrect_n35_unclipped.pdf`
+
+Important cohort note: a separate Qwen 350-sample parquet family exists under
+tags containing
+`extreme_clean_answer_confidence_stripped_softmax_filtered350_finaltoken_qwen_prefill_empty_thinking`.
+It generated the differently named
+`two_metrics_*_clean_answer_confidence_qwen_filtered350_llava1000_*` figures.
+The exact final figures named above use the non-`filtered350` tags and the
+plotting script's 100-sample defaults.
+
+## Top-5 Softmax Status
+
+The configured LLaVA positional parquets and LLaVA POPE layer parquet do not
+contain stripped-answer softmax distributions. Most other configured sweep
+parquets contain raw `stripped_answer_softmax_*` matrices, but not materialized
+top-5 token IDs/text/probabilities. These raw distributions are stored in
+single-row-group files as large as tens of GiB, so they are not suitable for
+interactive per-sample decoding.
+
+The visualizer documents this below each three-panel view. To enable a real
+compact top-5 table, add first stripped-answer-step top-5 IDs, decoded token
+text, and probabilities to
+`src/patching/run_patching.py::_compute_stripped_answer_softmax_stats`, then rerun
+layer and positional sweeps with `--save_stripped_answer_softmax`.
+
+### Softmax Changes POC (layer sweep)
+A lightweight standalone experiment that *does* materialize compact top-5 softmax
+for browsing — without touching the production parquets.
+
+- **Runner**: `src/patching/run_softmax_changes.py` (core) + `src/cli/run_softmax_changes.py` (CLI).
+  Reuses the exact layer-sweep machinery: `_extract_all_layer_activations`,
+  `_get_final_prompt_positions`, `_get_layer_index_pairs` (from `run_layer_sweep_patching`)
+  and `_run_baseline_forward`, `_patched_generate`, `_compute_output_stats`,
+  `_answer_token_indices` (from `run_patching`). It patches the **final prompt token**
+  (`position_offset == -1`) at **every LM layer** and records the output softmax top-5 at
+  the first stripped answer-token step for the clean baseline, corrupted baseline, and each
+  patched layer.
+- **Cohort filter** is identical to the main layer-sweep plot: keep only samples with
+  `clean_score > 0 and corrupted_score == 0` (same as `_final_plot_cohort` in
+  `qualitative_viewer/data_utils.py`). The CLI scans a shuffled pool (`--seed`, default 0)
+  up to `--max_candidates` (default 100) and retains `--n_samples` (default 10).
+- **Severity = `extreme`** for coco-qa-vi (matches the coco-qa-vi layer sweep; the Qwen
+  dataset only carries `extreme`). Qwen must use `--qwen_prefill_empty_thinking`.
+- **Output** (one self-contained JSON per model+dataset, ~small):
+  `/projects/prjs2014/patching/softmax_changes/<model_slug>/<dataset>/softmax_changes.json`.
+  Schema (v2): `metadata{schema_version, ...}` + `samples[{sample_id, question, ground_truth,
+  clean_image_path, degraded_image_path,
+  clean{answer,score,top1_probability,clean_answer_probability,top5[]},
+  corrupted{...}, layers[{layer, patched{...}}]}]`. `clean_answer_probability` (schema v2) is
+  the probability that run assigned to the **clean run's answer tokens** (reuses
+  `run_patching._compute_clean_answer_probability_stats`), powering the viewer's
+  "Clean answer confidence" panel line.
+- **SLURM**: `scripts/patching/{llava,qwen}/coco-qa-vi/run_softmax_changes.job`
+  (submit with plain `sbatch`, no `--export=ALL`).
+- **Viewer**: a new **"Softmax changes"** option in the `Sweep` radio
+  (`qualitative_viewer/app.py::show_softmax_changes_view`). It loads the JSON via
+  `softmax_changes_path` (config) → `softmax_changes_available` / `softmax_changes_data`
+  (data_utils). It **reuses the Layer-sweep three-panel layout** (`show_three_panel_layout`)
+  for the selected model/sample/layer — Clean | Corrupted | Patched@L panels with image,
+  full prompt, answer+confidence, and the patched-token marker on the final prompt token —
+  then renders the three **top-5 softmax tables** (token, softmax probability) below, plus a
+  per-layer patched top-1 scan table. A sidebar layer selector and a header line show the
+  current model / sample / layer / severity / run type.
+- **Sample alignment**: the LLaVA and Qwen runs were drawn from different random samples and
+  currently share **0 sample_ids** (though the two coco-qa-vi datasets share 800 ids with
+  matching question+image, so alignment is achievable by re-running on a common pool).
+  Browsing is therefore **model-specific** (one model at a time); the view reports the
+  cross-model overlap. If the outputs were aligned, the same view is the place to add a
+  two-row (LLaVA / Qwen) same-sample comparison.
+- **Cross-tab "clean answer confidence" line** (`app.py::_panel_answer_block`, shared by
+  Positional sweep, Layer sweep, Softmax changes — on-screen panels and PDF/PNG export):
+  line 1 is the run's own expressed answer + confidence; line 2 is the probability that run
+  assigned to the **clean run's answer**, shown only when it adds information:
+  - **non-POPE**: `Clean answer confidence: <clean answer> (P)` using
+    `<cond>_clean_answer_probability`, only when the run's answer differs from the clean
+    answer (NaN → omitted).
+  - **POPE** (binary): always show the complementary answer's probability, e.g.
+    `Answer: no (0.89)` / `yes (0.11)`, using per-run `pope_yes_probability` /
+    `pope_no_probability` (threaded through `data_utils.py`). Falls back to the non-POPE line
+    where those columns are absent (e.g. the LLaVA positional-POPE parquet).
+  Scope of the Softmax changes tab is the coco-qa-vi POC (`SOFTMAX_CHANGES_DATASETS`); this
+  is **not** wired into the production parquet sweeps.
+
+## Important Data Paths
+
+- Patching datasets:
+  `/projects/prjs2014/patching/<model>/<dataset>/patching_dataset_<dataset>.json`
+- Layer sweeps:
+  `/projects/prjs2014/patching/layer_sweep_results/<model>/<dataset>/<tag>/layer_sweep_results.parquet`
+- Positional sweeps:
+  `/projects/prjs2014/patching/positional_patching_results_including_visual/<model>/<dataset>/<tag>/positional_patching_results.parquet`
+- Softmax-changes POC:
+  `/projects/prjs2014/patching/softmax_changes/<model>/<dataset>/softmax_changes.json`
+- Visualizer exports:
+  `/projects/prjs2014/patching/qualitative_viewer/`
+- Viewer source configuration:
+  `qualitative_viewer/config.py`
+- Viewer data preparation:
+  `qualitative_viewer/data_utils.py`
+- Viewer UI and exports:
+  `qualitative_viewer/app.py`
+
+For POPE, the dataset path component is `pope/random`. Cached Hugging Face
+processors must remain available for exact prompt-token reconstruction and
+model-specific visual patch geometry.
+
 
 ### SLURM Submission Gotcha
 Do **not** pass `--export=ALL,VAR=value` when submitting patching jobs from a programmatic shell — `ALL` inherits the caller's env and breaks the job's `module load Anaconda3` + `source activate llava-experiments` flow (observed failure: `ModuleNotFoundError: No module named 'torch'`). Use `--export=VAR=value` (without `ALL`) instead; slurm then sets only the minimal env plus the overrides, and `source activate` works as in an interactive submission.

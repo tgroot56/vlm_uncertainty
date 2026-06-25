@@ -2,25 +2,70 @@
 
 This directory contains a Streamlit viewer and export scripts for sample-level activation-patching results behind:
 
-- `/projects/prjs2014/patching/filtered_plots/cross_model/sample_cutoff/two_metrics_positional_sweep_nofilter_100_alltokenspans.pdf`
-- `/projects/prjs2014/patching/filtered_plots/cross_model/sample_cutoff/two_metrics_layer_sweep_nofilter.pdf`
+- `/projects/prjs2014/patching/positional_patching_results_including_visual/two_metrics_positional_sweep_clean_answer_confidence_clean_correct_corrupted_incorrect_n35_unclipped.pdf`
+- `/projects/prjs2014/patching/layer_sweep_results/two_metrics_layer_sweep_clean_answer_confidence_clean_correct_corrupted_incorrect_unclipped.pdf`
 
 ## Files loaded
 
-The viewer can switch between the same positional-sweep parquet files as
-`scripts/plot_two_metrics_positional_sweep.py`:
+The viewer can switch between the same positional-sweep parquet families as
+`scripts/plot_filtered_clean_answer_cross_model_sweeps.py`:
 
-- LLaVA-1.5-7B: `/projects/prjs2014/patching/positional_patching_results_including_visual/llava-hf_llava-1-5-7b-hf/{dataset}/extreme_answer_confidence/positional_patching_results.parquet`
-- Qwen3.5-9B: `/projects/prjs2014/patching/positional_patching_results_including_visual/Qwen_Qwen3-5-9B/{dataset}/extreme_answer_confidence_finaltoken_qwen_prefill_empty_thinking/positional_patching_results.parquet`
+- LLaVA-1.5-7B: `/projects/prjs2014/patching/positional_patching_results_including_visual/llava-hf_llava-1-5-7b-hf/{dataset}/extreme_clean_answer_confidence/positional_patching_results.parquet`
+- Qwen3.5-9B: `/projects/prjs2014/patching/positional_patching_results_including_visual/Qwen_Qwen3-5-9B/{dataset}/extreme_clean_answer_confidence_stripped_softmax_finaltoken_qwen_prefill_empty_thinking/positional_patching_results.parquet`
 - For POPE, `{dataset}` is `pope/random`.
 
-and the same layer-sweep parquet files as `scripts/plot_two_metrics_layer_sweep.py`:
+and the configured layer-sweep parquet files:
 
-- LLaVA-1.5-7B: `/projects/prjs2014/patching/layer_sweep_results/llava-hf_llava-1-5-7b-hf/{dataset}/extreme_answer_confidence/layer_sweep_results.parquet`
-- Qwen3.5-9B: `/projects/prjs2014/patching/layer_sweep_results/Qwen_Qwen3-5-9B/{dataset}/extreme_answer_confidence_finaltoken_qwen_prefill_empty_thinking/layer_sweep_results.parquet`
+- LLaVA-1.5-7B VQA-v2, COCO-QA, and ImageNet-R: `/projects/prjs2014/patching/layer_sweep_results/llava-hf_llava-1-5-7b-hf/{dataset}/extreme_clean_answer_confidence_stripped_softmax/layer_sweep_results.parquet`
+- LLaVA-1.5-7B POPE: `/projects/prjs2014/patching/layer_sweep_results/llava-hf_llava-1-5-7b-hf/pope/random/extreme_answer_confidence_clean_answer/layer_sweep_results.parquet`
+- Qwen3.5-9B: `/projects/prjs2014/patching/layer_sweep_results/Qwen_Qwen3-5-9B/{dataset}/extreme_clean_answer_confidence_stripped_softmax_finaltoken_qwen_prefill_empty_thinking/layer_sweep_results.parquet`
 - For POPE, `{dataset}` is `pope/random`.
+
+The loader reproduces the named final-plot cohort logic: take the first 100
+source sample IDs for each model/dataset, retain clean-correct and
+corrupted-incorrect sample/severity pairs, and use a minimum of 35 samples at
+each positional slot. The exact named plot artifacts and their source script do
+not use the separate Qwen `filtered350` parquet family. That 350-sample run
+generated the differently named
+`two_metrics_*_clean_answer_confidence_qwen_filtered350_llava1000_*` figures.
 
 It also loads the matching `patching_dataset_<dataset>.json` files for image paths, questions, and ground-truth answers.
+
+The `Gradient-guided patching` result mode currently supports LLaVA POPE
+random samples under:
+
+`/projects/prjs2014/patching/gradient_guided_token_patching/llava-hf_llava-1-5-7b-hf/pope/random/sample_<id>/obj_yes`
+
+It compares patched layers 1, 11, 15, and 18 in a four-panel view. Each panel
+uses the clean image, exact saved prompt tokens, the final patched answer and
+confidence, and numbered highlights showing gradient-guided token selection
+order. Hovering a highlighted token in the browser view shows its prompt
+position, span, and incremental objective change.
+
+The `Softmax changes` result mode is a layer-sweep proof-of-concept (coco-qa-vi,
+both models). It loads one self-contained JSON per model/dataset from:
+
+`/projects/prjs2014/patching/softmax_changes/<model_slug>/<dataset>/softmax_changes.json`
+
+resolved by `softmax_changes_path` in `config.py` and read by
+`softmax_changes_available` / `softmax_changes_data` in `data_utils.py`. Generate
+the JSON with `python -m src.cli.run_softmax_changes` (SLURM:
+`scripts/patching/{llava,qwen}/coco-qa-vi/run_softmax_changes.job`). The experiment
+mirrors the main layer-sweep cohort (clean correct, corrupted incorrect; severity
+`extreme`) and patches the final prompt token at every LM layer.
+
+The view reuses the Layer-sweep three-panel layout: for the selected model, sample,
+and patch layer it shows Clean | Corrupted | Patched@L panels (image, full prompt,
+answer + confidence, patched-token marker on the final prompt token), then the three
+top-5 softmax tables (token, softmax probability) below, plus a per-layer patched
+top-1 scan table. The LLaVA and Qwen runs currently share no samples, so browsing is
+model-specific and the view reports the cross-model overlap.
+
+Each panel (here and in the Positional/Layer sweep views) shows the run's own answer
+and confidence, then a **clean answer confidence** line: the probability that run
+assigned to the *clean run's* answer. For non-POPE datasets it appears only when the
+run's answer differs from the clean answer; for POPE it always shows the complementary
+binary answer's probability (e.g. `Answer: no (0.89)` then `yes (0.11)`).
 
 ## Run validation
 
@@ -102,14 +147,35 @@ The default selected-sample view is the three-panel layout implemented by
 corrupted, and patched runs side by side, with the image, full prompt, answer,
 and answer-level geometric confidence for each run.
 
-For visual-token patches, the `Clean inset for visual patches` display option
-adds a small clean-image inset inside the patched-run panel. The inset uses the
-same visual-token geometry as the blurred-image highlight and can be turned off
-without changing code.
+For visual-token patches, the `Enlarged clean patch callout` display option
+keeps the corrupted image and orange patch marker as the patched panel's main
+image, then connects that marker to an enlarged crop of the
+corresponding clean-image region. The callout shows a 5x5 neighborhood of
+visual-token cells with subtle neighboring-cell boundaries and a stronger
+orange highlight on the exact patched cell. The image-only crop has no title or
+whitespace, and the connector arrow terminates inside the orange center cell to
+make clear that only that cell was patched. The 5x5 crop has no orange outer
+border, so orange markings identify only the source patch, connector, and exact
+center patched cell. It overlays the lower-right side of the patched image so
+the prompt remains aligned with the other panels. It uses the same visual-token
+geometry as the corrupted-image highlight and can be turned off without
+changing code.
 
 The same selected sample can be exported with the `Download three-panel PDF`
 and `Download three-panel PNG` buttons under the figure. The PDF keeps text and
 panel borders vector-sharp for thesis use; images are embedded at high DPI.
+
+Gradient-guided samples have corresponding `Download four-panel PDF` and
+`Download four-panel PNG` buttons.
+
+Below the qualitative panels, the app reports top-5 softmax availability. The
+current LLaVA positional and LLaVA POPE layer parquets do not store stripped
+answer softmaxes. Other configured parquets store full raw softmax matrices,
+but not materialized top-5 token IDs/text/probabilities; those files are
+single-row-group, multi-gigabyte parquets, so reading the binary distribution
+column for each UI selection is not interactive-safe. Materialized top-5 fields
+should be added in
+`src/patching/run_patching.py::_compute_stripped_answer_softmax_stats`.
 
 To switch back without editing files, use the sidebar control
 `Selected sample layout` and choose `Original`. To permanently restore the old

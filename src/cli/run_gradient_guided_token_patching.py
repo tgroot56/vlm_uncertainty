@@ -84,6 +84,40 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--objectives",
+        nargs="+",
+        choices=[
+            "answer_recovery",
+            "confidence_recovery",
+            "maximize_p_yes",
+            "maximize_p_no",
+        ],
+        default=["answer_recovery", "confidence_recovery"],
+        help="Greedy objectives to run.",
+    )
+    parser.add_argument(
+        "--early_stop_window",
+        type=int,
+        default=0,
+        help="Stop after this many recent steps satisfy the rolling threshold; 0 disables it.",
+    )
+    parser.add_argument(
+        "--early_stop_abs_sum_threshold",
+        type=float,
+        default=0.0,
+        help="Stop when the sum of absolute objective changes in the rolling window is below this value.",
+    )
+    parser.add_argument(
+        "--require_corrupted_no",
+        action="store_true",
+        help="Require the selected corrupted example to be an incorrect no prediction.",
+    )
+    parser.add_argument(
+        "--qwen_prefill_empty_thinking",
+        action="store_true",
+        help="Use the codebase's Qwen empty-thinking prefill so generation starts at the visible answer token.",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default="cuda" if torch.cuda.is_available() else "cpu",
@@ -144,6 +178,11 @@ def main() -> None:
         require_clean_yes=not args.allow_non_yes,
         verbose=args.verbose,
         make_figures=not args.no_figures,
+        run_types=list(args.objectives),
+        early_stop_window=args.early_stop_window,
+        early_stop_abs_sum_threshold=args.early_stop_abs_sum_threshold,
+        require_corrupted_no=args.require_corrupted_no,
+        qwen_prefill_empty_thinking=args.qwen_prefill_empty_thinking,
     )
 
     run_gradient_guided_token_patching(

@@ -20,6 +20,10 @@ LLAVA_LS = _ROOT / "layer_sweep_results/llava-hf_llava-1-5-7b-hf"
 QWEN_LS  = _ROOT / "layer_sweep_results/Qwen_Qwen3-5-9B"
 
 DATASETS = ["vqa-v2", "coco-qa-vi", "imagenet-r", "pope"]
+DATASET_SPLITS = [
+    ("vqa_coco", ["vqa-v2", "coco-qa-vi"]),
+    ("imagenet_pope", ["imagenet-r", "pope"]),
+]
 
 LLAVA_SUBDIR = "extreme_answer_confidence"
 
@@ -60,5 +64,15 @@ plot_two_metrics_cross_model_layer_sweep(
     min_delta=0.0,
     clip_recovery=False,
 )
+
+for split_name, datasets in DATASET_SPLITS:
+    plot_two_metrics_cross_model_layer_sweep(
+        model_entries=model_entries,
+        datasets=datasets,
+        output_dir=CROSS_OUT,
+        output_name=f"two_metrics_layer_sweep_unclipped_{split_name}",
+        min_delta=0.0,
+        clip_recovery=False,
+    )
 
 print("\nDone.")

@@ -38,12 +38,23 @@ DEVICE="${DEVICE:-cuda}"
 LAYER="${LAYER:-17}"
 SEVERITY="${SEVERITY:-extreme}"
 MAX_SAMPLES="${MAX_SAMPLES:-1000}"
+CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-10}"
 SAMPLE_VISUAL_EVERY="${SAMPLE_VISUAL_EVERY:-10}"
 INCLUDE_VISUAL_LAST="${INCLUDE_VISUAL_LAST:-10}"
 OUTPUT_TAG="${OUTPUT_TAG:-extreme_answer_confidence}"
+SAVE_CLEAN_ANSWER_PROBABILITY="${SAVE_CLEAN_ANSWER_PROBABILITY:-0}"
+RETAIN_CHECKPOINT="${RETAIN_CHECKPOINT:-0}"
 
 PATCHING_DATASET="${PATCHING_DATASET:-$VLM_UQ_STORAGE_ROOT/patching/$VLM_SHORT/$DATASET/$DATASET_SPLIT/patching_dataset_$DATASET.json}"
 OUTPUT_DIR="${OUTPUT_DIR:-$VLM_UQ_STORAGE_ROOT/patching/positional_patching_results_including_visual/$VLM_SHORT/$DATASET/$DATASET_SPLIT/$OUTPUT_TAG}"
+
+EXTRA_ARGS=()
+if [[ "$SAVE_CLEAN_ANSWER_PROBABILITY" == "1" ]]; then
+  EXTRA_ARGS+=(--save_clean_answer_probability)
+fi
+if [[ "$RETAIN_CHECKPOINT" == "1" ]]; then
+  EXTRA_ARGS+=(--retain_checkpoint)
+fi
 
 srun python -u -m src.cli.run_positional_patching \
   --patching_dataset "$PATCHING_DATASET" \
@@ -54,4 +65,6 @@ srun python -u -m src.cli.run_positional_patching \
   --sample_visual_every "$SAMPLE_VISUAL_EVERY" \
   --include_visual_last "$INCLUDE_VISUAL_LAST" \
   --device "$DEVICE" \
-  --max_samples "$MAX_SAMPLES"
+  --max_samples "$MAX_SAMPLES" \
+  --checkpoint_every "$CHECKPOINT_EVERY" \
+  "${EXTRA_ARGS[@]}"

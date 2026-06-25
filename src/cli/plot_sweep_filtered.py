@@ -253,6 +253,7 @@ def _prepare_positional_sweep(
     min_delta: float = DELTA_THRESHOLD,
     min_pos_samples: int = MIN_POS_SAMPLES,
     span_min_pos_samples: dict[str, int] | None = None,
+    metrics: list[str] | None = None,
 ) -> tuple[pd.DataFrame, list[int], dict, list[str], int, int]:
     """Load and filter positional sweep data.
 
@@ -260,14 +261,31 @@ def _prepare_positional_sweep(
     so that e.g. assistant_marker token 0 is always token 0 regardless of question length.
     Returns (df, canonical_xs, span_regions, severities, n_total, n_filtered).
     """
-    df = pd.read_parquet(parquet_path)
+    import pyarrow.parquet as pq
+
+    requested_metrics = metrics or METRICS
+    available = set(pq.ParquetFile(parquet_path).schema.names)
+    columns = list(dict.fromkeys([
+        column for column in [
+            "sample_id",
+            "severity",
+            "condition",
+            "token_position",
+            "span_label",
+            "top1_probability",
+            *requested_metrics,
+        ]
+        if column in available
+    ]))
+    df = pd.read_parquet(parquet_path, columns=columns)
     patched = df[df["condition"].str.startswith("patched")].copy()
-    patched = _attach_baselines(patched, df)
+    active_metrics = [m for m in requested_metrics if m in df.columns]
+    patched = _attach_baselines(patched, df, metrics=active_metrics)
 
     n_total = df[df["condition"] == "clean"]["sample_id"].nunique()
     patched = _apply_delta_filter(patched, min_delta=min_delta)
     n_filtered = patched["sample_id"].nunique()
-    patched = _add_recovery_columns(patched)
+    patched = _add_recovery_columns(patched, metrics=active_metrics)
 
     # Compute per-sample span-start token position, then span-relative position
     span_starts = (
@@ -853,6 +871,9 @@ def _draw_layer_ax_two_metrics(
     show_ylabel: bool = True,
     metrics: list[str] | None = None,
     clip_recovery: bool = True,
+    style: dict[str, float] | None = None,
+    text: dict[str, object] | None = None,
+    layout: dict[str, float] | None = None,
 ) -> list:
     """Draw recovery curves for two metrics overlaid in one axes.
 
@@ -864,6 +885,14 @@ def _draw_layer_ax_two_metrics(
     """
     if metrics is None:
         metrics = ["top1_probability", "score"]
+    style = style or {}
+    text = text or {}
+    layout = layout or {}
+    legend_labels = text.get("legend_labels", {})
+    line_width = layout.get("line_width", layout.get("bar_width", 2))
+    full_recovery_line_width = layout.get("full_recovery_line_width", 1.5)
+    marker_size = layout.get("marker_size", 5)
+    group_spacing = layout.get("group_spacing", None)
     linestyles = ["-", "--", ":"]
     legend_handles = []
     metrics = [
@@ -891,30 +920,34 @@ def _draw_layer_ax_two_metrics(
             # x-axis: display as 1-based (layer 0 → tick 1)
             display_xs = [l + 1 for l in layers]
             ax.plot(display_xs, ys, marker="o", linestyle=ls, color=color,
-                    linewidth=2, markersize=5, zorder=4)
+                    linewidth=line_width, markersize=marker_size, zorder=4)
             ax.fill_between(display_xs, los, his, color=color, alpha=0.12)
-        label = TWO_METRIC_LEGEND_LABELS.get(metric, metric)
+        label = legend_labels.get(metric, TWO_METRIC_LEGEND_LABELS.get(metric, metric))
         legend_handles.append(
-            plt.Line2D([0], [0], color=color, linewidth=2, linestyle=ls, label=label)
+            plt.Line2D([0], [0], color=color, linewidth=line_width, linestyle=ls, label=label)
         )
 
     ax.axhline(0, color="#9ca3af", linewidth=0.8, linestyle="--")
-    ax.axhline(1, color="#6b7280", linewidth=1.5, linestyle=":", alpha=0.85, zorder=2)
+    ax.axhline(1, color="#6b7280", linewidth=full_recovery_line_width,
+               linestyle=":", alpha=0.85, zorder=2)
     display_xs_all = [l + 1 for l in layers]
     ax.set_xticks(display_xs_all)
-    ax.set_xticklabels([str(x) for x in display_xs_all], fontsize=8, rotation=45)
+    ax.set_xticklabels([str(x) for x in display_xs_all], fontsize=style.get("tick_label_size", 8), rotation=45)
     if show_xlabel:
-        ax.set_xlabel("Layer", fontsize=14)
+        ax.set_xlabel(text.get("x_label", "Layer"), fontsize=style.get("axis_label_size", 14))
+    if group_spacing is not None:
+        ax.margins(x=group_spacing)
     ax.grid(alpha=0.3)
     if show_ylabel:
-        label = "Aggregate recovery" if clip_recovery else "Aggregate recovery (unclipped)"
-        ax.set_ylabel(label, fontsize=14)
+        label = text.get("axis_recovery_label", "Aggregate recovery") if clip_recovery else text.get("axis_recovery_unclipped_label", "Aggregate recovery (unclipped)")
+        ax.set_ylabel(label, fontsize=style.get("axis_label_size", 14))
     else:
         ax.set_ylabel("")
 
     legend_handles.append(
-        plt.Line2D([0], [0], color="#6b7280", linewidth=1.5, linestyle=":",
-                   label="Full recovery (RR=1)")
+        plt.Line2D([0], [0], color="#6b7280",
+                   linewidth=full_recovery_line_width, linestyle=":",
+                   label=legend_labels.get("full_recovery", "Full recovery (RR=1)"))
     )
     return legend_handles
 
@@ -1324,10 +1357,23 @@ def _draw_positional_ax_two_metrics(
     show_ylabel: bool = True,
     metrics: list[str] | None = None,
     clip_recovery: bool = True,
+    style: dict[str, float] | None = None,
+    text: dict[str, object] | None = None,
+    layout: dict[str, float] | None = None,
 ) -> list:
     """Draw confidence and accuracy recovery overlaid by patched position."""
     if metrics is None:
         metrics = ["top1_probability", "score"]
+    style = style or {}
+    text = text or {}
+    layout = layout or {}
+    legend_labels = text.get("legend_labels", {})
+    span_axis_labels = text.get("span_axis_labels", {})
+    span_legend_labels = text.get("span_legend_labels", {})
+    line_width = layout.get("line_width", layout.get("bar_width", 2))
+    full_recovery_line_width = layout.get("full_recovery_line_width", 1.5)
+    marker_size = layout.get("marker_size", 3)
+    group_spacing = layout.get("group_spacing", None)
     linestyles = ["-", "--"]
     legend_handles = []
     for i, metric in enumerate(metrics):
@@ -1347,11 +1393,11 @@ def _draw_positional_ax_two_metrics(
                 his.append(hi)
             ys, los, his = np.array(ys), np.array(los), np.array(his)
             ax.plot(canonical_xs, ys, marker="o", linestyle=ls, color=color,
-                    linewidth=2, markersize=3, zorder=4)
+                    linewidth=line_width, markersize=marker_size, zorder=4)
             ax.fill_between(canonical_xs, los, his, color=color, alpha=0.12)
-        label = TWO_METRIC_LEGEND_LABELS.get(metric, metric)
+        label = legend_labels.get(metric, TWO_METRIC_LEGEND_LABELS.get(metric, metric))
         legend_handles.append(
-            plt.Line2D([0], [0], color=color, linewidth=2, linestyle=ls, label=label)
+            plt.Line2D([0], [0], color=color, linewidth=line_width, linestyle=ls, label=label)
         )
 
     span_patches = []
@@ -1366,15 +1412,15 @@ def _draw_positional_ax_two_metrics(
         if all_cx and lo_x > min(all_cx) - 0.5:
             ax.axvline(lo_x, color="#9ca3af", linewidth=0.8, linestyle="-", zorder=1)
         tick_positions.append((lo_x + hi_x) / 2)
-        tick_labels.append(SPAN_AXIS_LABELS.get(span, SPAN_DISPLAY.get(span, span)))
+        tick_labels.append(span_axis_labels.get(span, SPAN_AXIS_LABELS.get(span, SPAN_DISPLAY.get(span, span))))
         tick_spans.append(span)
         span_patches.append(
-            mpatches.Patch(facecolor=color, alpha=0.5, label=SPAN_DISPLAY.get(span, span))
+            mpatches.Patch(facecolor=color, alpha=0.5, label=span_legend_labels.get(span, SPAN_DISPLAY.get(span, span)))
         )
 
     ax.set_xticks(tick_positions)
     if show_xlabel:
-        ax.set_xticklabels(tick_labels, fontsize=11, color="#374151")
+        ax.set_xticklabels(tick_labels, fontsize=style.get("tick_label_size", 11), color="#374151")
         for label, span in zip(ax.get_xticklabels(), tick_spans):
             if span == "question":
                 label.set_ha("right")
@@ -1388,17 +1434,21 @@ def _draw_positional_ax_two_metrics(
         ax.tick_params(axis="x", length=0)
 
     ax.axhline(0, color="#9ca3af", linewidth=0.8, linestyle="--")
-    ax.axhline(1, color="#6b7280", linewidth=1.5, linestyle=":", alpha=0.85, zorder=2)
+    ax.axhline(1, color="#6b7280", linewidth=full_recovery_line_width,
+               linestyle=":", alpha=0.85, zorder=2)
+    if group_spacing is not None:
+        ax.margins(x=group_spacing)
     ax.grid(alpha=0.3)
     if show_ylabel:
-        label = "Aggregate recovery" if clip_recovery else "Aggregate recovery (unclipped)"
-        ax.set_ylabel(label, fontsize=14)
+        label = text.get("axis_recovery_label", "Aggregate recovery") if clip_recovery else text.get("axis_recovery_unclipped_label", "Aggregate recovery (unclipped)")
+        ax.set_ylabel(label, fontsize=style.get("axis_label_size", 14))
     else:
         ax.set_ylabel("")
 
     legend_handles.append(
-        plt.Line2D([0], [0], color="#6b7280", linewidth=1.5, linestyle=":",
-                   label="Full recovery (RR=1)")
+        plt.Line2D([0], [0], color="#6b7280",
+                   linewidth=full_recovery_line_width, linestyle=":",
+                   label=legend_labels.get("full_recovery", "Full recovery (RR=1)"))
     )
     return legend_handles + span_patches
 
@@ -1451,6 +1501,7 @@ def plot_two_metrics_cross_model_positional_sweep(
                         min_delta=min_delta,
                         min_pos_samples=min_pos_samples,
                         span_min_pos_samples=span_min_pos_samples,
+                        metrics=metrics,
                     )
                     handles = _draw_positional_ax_two_metrics(
                         ax, df, canonical_xs, span_regions, sevs,

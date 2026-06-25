@@ -67,6 +67,10 @@ TICK_LABEL_FONTSIZE = LAYER_EXPERIMENT_FONT_SIZES.tick_label
 LEGEND_FONTSIZE = LAYER_EXPERIMENT_FONT_SIZES.legend
 COMBINED_FIG_TITLE_FONTSIZE = LAYER_EXPERIMENT_FONT_SIZES.combined_figure_title
 ANNOTATION_FONTSIZE = LAYER_EXPERIMENT_FONT_SIZES.annotation
+COMBINED_LAYER_FIGURE_TITLE_SIZE = 28
+COMBINED_LAYER_SUBPLOT_TITLE_SIZE = 20
+COMBINED_LAYER_AXIS_LABEL_SIZE = 18
+COMBINED_LAYER_Y_LIMITS = None
 LAYER_XTICK_STRIDE = 4
 OUTPUT_DIST_X_GAP = 6
 
@@ -101,7 +105,7 @@ SCALAR_VARIANTS = [
 
 ENTROPY_FEATURE_NAME = "answer_gen_entropy_mean"
 
-COMBINED_DATASET_ORDER = ["vqa-v2", "coco-qa-vi", "pope/random", "imagenet-r"]
+COMBINED_DATASET_ORDER = ["vqa-v2", "coco-qa-vi", "imagenet-r", "pope/random"]
 COMBINED_DATASET_LABELS = {
     "vqa-v2": "VQA-v2",
     "coco-qa-vi": "COCO-QA",
@@ -129,7 +133,7 @@ MODEL_DATASET_CONFIGS: Dict[str, Dict[str, Dict[str, Path | str]]] = {
                 "/projects/prjs2014/llava/layer_experiment/probe_results/pope/random/mlp_layer_comparison/mlp"
             ),
             "output_pdf": Path("probe_results/layer_experiment/llava_pope_random_mlp_layer_brier.pdf"),
-            "title": "LLaVA POPE: uncertainty signal across LM layers",
+            "title": "LLaVA POPE: confidence signal across LM layers",
         },
         "vqa-v2": {
             "results_root": Path(
@@ -182,7 +186,7 @@ MODEL_DATASET_CONFIGS: Dict[str, Dict[str, Dict[str, Path | str]]] = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Plot Brier score versus LM layer for a LLaVA layer experiment."
+            "Plot MSE versus LM layer for a LLaVA layer experiment."
         )
     )
     parser.add_argument(
@@ -255,7 +259,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--combined-all-datasets",
         action="store_true",
-        help="Save a 2x2 all-dataset layer-sweep figure for --model.",
+        help=(
+            "Save a 2x2 all-dataset layer-sweep figure for --model, followed "
+            "by the individual dataset figures."
+        ),
     )
     parser.add_argument(
         "--combined-output-pdf",
@@ -494,9 +501,31 @@ def draw_layer_scores_on_axis(
     show_legend: bool = True,
     annotate_best: bool = True,
     annotate_scalar_scores: bool = True,
+    scalar_scores_as_horizontal_lines: bool = False,
+    y_limits: Optional[Tuple[float, float]] = None,
+    title_fontsize: Optional[int] = None,
+    axis_label_fontsize: Optional[int] = None,
 ) -> None:
     all_layers = sorted({layer for points in layer_scores.values() for layer, _, _ in points})
-    scalar_positions = _scalar_positions(layer_scores, scalar_scores, scalar_styles)
+    scalar_positions = (
+        {}
+        if scalar_scores_as_horizontal_lines
+        else _scalar_positions(layer_scores, scalar_scores, scalar_styles)
+    )
+
+    for feature_name, (score, _) in scalar_scores.items():
+        if not scalar_scores_as_horizontal_lines:
+            continue
+        style = scalar_styles[feature_name]
+        ax.axhline(
+            score,
+            linestyle=":",
+            linewidth=2.2,
+            color=str(style["color"]),
+            alpha=0.95,
+            label=str(style["label"]),
+            zorder=2,
+        )
 
     for feature_name, x_pos in scalar_positions.items():
         score, _ = scalar_scores[feature_name]
@@ -596,7 +625,7 @@ def draw_layer_scores_on_axis(
                 },
             )
 
-    ax.set_title(title, fontsize=AX_TITLE_FONTSIZE, fontweight="bold")
+    ax.set_title(title, fontsize=title_fontsize or AX_TITLE_FONTSIZE, fontweight="bold")
     ax.grid(True, alpha=0.25, linewidth=0.8)
 
     tick_labels_by_position: Dict[int, str] = {}
@@ -625,9 +654,11 @@ def draw_layer_scores_on_axis(
         left = (min(all_layers) - 0.75) if all_layers else min(extra_ticks) - 1
         ax.set_xlim(left, max(extra_ticks) + 1.25)
 
-    ax.set_xlabel("Layer index" if show_xlabel else "", fontsize=AX_LABEL_FONTSIZE)
-    ax.set_ylabel("Brier score" if show_ylabel else "", fontsize=AX_LABEL_FONTSIZE)
+    ax.set_xlabel("Layer index" if show_xlabel else "", fontsize=axis_label_fontsize or AX_LABEL_FONTSIZE)
+    ax.set_ylabel("MSE" if show_ylabel else "", fontsize=axis_label_fontsize or AX_LABEL_FONTSIZE)
     ax.tick_params(axis="both", labelsize=TICK_LABEL_FONTSIZE)
+    if y_limits is not None:
+        ax.set_ylim(*y_limits)
 
     if show_legend:
         ax.legend(frameon=False, fontsize=LEGEND_FONTSIZE)
@@ -760,6 +791,7 @@ def plot_combined_all_datasets(
     include_default_scalars: bool = True,
     annotate_scalar_scores: bool = True,
     title: str = "LLaVA Layer Sweep",
+    scalar_scores_as_horizontal_lines: bool = False,
 ) -> Path:
     output_pdf.parent.mkdir(parents=True, exist_ok=True)
     output_png = output_pdf.with_suffix(".png")
@@ -821,6 +853,10 @@ def plot_combined_all_datasets(
             show_legend=False,
             annotate_best=True,
             annotate_scalar_scores=annotate_scalar_scores,
+            scalar_scores_as_horizontal_lines=scalar_scores_as_horizontal_lines,
+            y_limits=COMBINED_LAYER_Y_LIMITS,
+            title_fontsize=COMBINED_LAYER_SUBPLOT_TITLE_SIZE,
+            axis_label_fontsize=COMBINED_LAYER_AXIS_LABEL_SIZE,
         )
 
         handles, labels = ax.get_legend_handles_labels()
@@ -836,7 +872,7 @@ def plot_combined_all_datasets(
         fontsize=LEGEND_FONTSIZE,
         bbox_to_anchor=(0.5, 0.985),
     )
-    fig.suptitle(title, fontsize=COMBINED_FIG_TITLE_FONTSIZE, y=1.01)
+    fig.suptitle(title, fontsize=COMBINED_LAYER_FIGURE_TITLE_SIZE, y=1.01)
     fig.tight_layout(rect=(0, 0, 1, 0.93))
     fig.savefig(output_pdf, format="pdf", bbox_inches="tight")
     fig.savefig(output_png, format="png", dpi=300, bbox_inches="tight")
@@ -849,14 +885,14 @@ def print_summary(
     scalar_scores: Dict[str, Tuple[float, Path]],
 ) -> None:
     for feature_name, (score, result_dir) in scalar_scores.items():
-        print(f"{feature_name}: brier={score:.6f}, result_dir={result_dir}")
+        print(f"{feature_name}: mse={score:.6f}, result_dir={result_dir}")
 
     for family, points in layer_scores.items():
         if not points:
             continue
         best_layer, best_score, best_dir = min(points, key=lambda item: item[1])
         print(
-            f"{family}: best layer={best_layer}, brier={best_score:.6f}, "
+            f"{family}: best layer={best_layer}, mse={best_score:.6f}, "
             f"result_dir={best_dir}"
         )
 
@@ -953,12 +989,30 @@ def main() -> None:
         )
         print(f"[saved] {combined_output_pdf}")
         print(f"[saved] {output_png}")
+        horizontal_lines_pdf = output_with_suffix(
+            combined_output_pdf,
+            "output_dist_horizontal_lines",
+        )
+        horizontal_lines_png = plot_combined_all_datasets(
+            model=args.model,
+            output_pdf=horizontal_lines_pdf,
+            extra_feature=None,
+            extra_features=extra_features,
+            layer_run_suffix=args.layer_run_suffix,
+            include_default_scalars=False,
+            annotate_scalar_scores=False,
+            title=f"{'LLaVA' if args.model == 'llava' else 'Qwen'} Layer Sweep",
+            scalar_scores_as_horizontal_lines=True,
+        )
+        print(f"[saved] {horizontal_lines_pdf}")
+        print(f"[saved] {horizontal_lines_png}")
         plot_combined_scalar_swap_variants(
             model=args.model,
             output_pdf=combined_output_pdf,
             layer_run_suffix=args.layer_run_suffix,
         )
-        return
+        # Continue below so a combined run also refreshes the four individual
+        # dataset figures (and their scalar variants) from the same inputs.
 
     datasets = selected_datasets(args)
     for dataset in datasets:

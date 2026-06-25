@@ -39,15 +39,26 @@ N_PROMPT_TOKENS="${N_PROMPT_TOKENS:-1}"
 MAX_SAMPLES="${MAX_SAMPLES:-1000}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-10}"
 PLOT_AT_N_SAMPLES="${PLOT_AT_N_SAMPLES:-100}"
-QWEN_PREFILL_EMPTY_THINKING="${QWEN_PREFILL_EMPTY_THINKING:-0}"
+MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-15}"
+QWEN_PREFILL_EMPTY_THINKING="${QWEN_PREFILL_EMPTY_THINKING:-1}"
+OUTPUT_TAG="${OUTPUT_TAG:-extreme_answer_confidence_finaltoken}"
+SAVE_CLEAN_ANSWER_PROBABILITY="${SAVE_CLEAN_ANSWER_PROBABILITY:-0}"
+SAVE_STRIPPED_ANSWER_SOFTMAX="${SAVE_STRIPPED_ANSWER_SOFTMAX:-0}"
+STRIPPED_ANSWER_SOFTMAX_DTYPE="${STRIPPED_ANSWER_SOFTMAX_DTYPE:-float32}"
 
 PATCHING_DATASET="${PATCHING_DATASET:-$VLM_UQ_STORAGE_ROOT/patching/$VLM_SHORT/$DATASET/$DATASET_SPLIT/patching_dataset_$DATASET.json}"
-OUTPUT_DIR="${OUTPUT_DIR:-$VLM_UQ_STORAGE_ROOT/patching/layer_sweep_results/$VLM_SHORT/$DATASET/$DATASET_SPLIT/extreme_answer_confidence_finaltoken}"
+OUTPUT_DIR="${OUTPUT_DIR:-$VLM_UQ_STORAGE_ROOT/patching/layer_sweep_results/$VLM_SHORT/$DATASET/$DATASET_SPLIT/$OUTPUT_TAG}"
 
 EXTRA_ARGS=()
 if [[ "$QWEN_PREFILL_EMPTY_THINKING" == "1" ]]; then
   EXTRA_ARGS+=(--qwen_prefill_empty_thinking)
   OUTPUT_DIR="${OUTPUT_DIR%/}_qwen_prefill_empty_thinking"
+fi
+if [[ "$SAVE_CLEAN_ANSWER_PROBABILITY" == "1" ]]; then
+  EXTRA_ARGS+=(--save_clean_answer_probability)
+fi
+if [[ "$SAVE_STRIPPED_ANSWER_SOFTMAX" == "1" ]]; then
+  EXTRA_ARGS+=(--save_stripped_answer_softmax --stripped_answer_softmax_dtype "$STRIPPED_ANSWER_SOFTMAX_DTYPE")
 fi
 
 srun python -u -m src.cli.run_layer_sweep_patching \
@@ -58,6 +69,7 @@ srun python -u -m src.cli.run_layer_sweep_patching \
   --severity "$SEVERITY" \
   --device "$DEVICE" \
   --max_samples "$MAX_SAMPLES" \
+  --max_new_tokens "$MAX_NEW_TOKENS" \
   --checkpoint_every "$CHECKPOINT_EVERY" \
   --plot_at_n_samples "$PLOT_AT_N_SAMPLES" \
   "${EXTRA_ARGS[@]}"

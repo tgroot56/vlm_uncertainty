@@ -7,6 +7,7 @@ import math
 import os
 import re
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -30,7 +31,12 @@ from src.uq_dataset_generation.tasks.pope import (
     _collect_unique_token_ids,
     _extract_yes_no_answer,
 )
-from src.vlm import VLMAdapter, prepare_inputs
+from src.vlm import (
+    VLMAdapter,
+    prepare_inputs,
+    prepare_qwen_fused_inputs_embeds,
+    qwen_vision_cache_context,
+)
 
 
 RECOVERY_EPSILON = 1e-8
@@ -52,6 +58,13 @@ class GradientGuidedTokenPatchingConfig:
     max_new_tokens: int = 15
     verbose: bool = False
     make_figures: bool = True
+    run_types: List[str] = field(
+        default_factory=lambda: ["answer_recovery", "confidence_recovery"]
+    )
+    early_stop_window: int = 0
+    early_stop_abs_sum_threshold: float = 0.0
+    require_corrupted_no: bool = False
+    qwen_prefill_empty_thinking: bool = False
 
     @property
     def code_layers(self) -> List[int]:
@@ -122,6 +135,10 @@ def _token_type(pos: int, token: Dict[str, Any], spans: Dict[str, Any]) -> str:
     text = str(token.get("decoded", token.get("display", ""))).strip().lower()
     raw = str(token.get("token", ""))
     if span == "visual":
+        if raw == "<|vision_start|>":
+            return "visual_boundary_start"
+        if raw == "<|vision_end|>":
+            return "visual_boundary_end"
         return "visual_patch"
     if raw == "<s>":
         return "bos_token"
@@ -136,6 +153,24 @@ def _token_type(pos: int, token: Dict[str, Any], spans: Dict[str, Any]) -> str:
             return "answer_instruction"
         return "question_word"
     return span
+
+
+def _token_span(token: Dict[str, Any]) -> str:
+    if str(token["token_type"]) == "final_prompt_token":
+        return "Final prompt token"
+    group = str(token["token_group"])
+    if group in {"text_pre", "text_post"}:
+        return "Template Prefix"
+    if group == "visual":
+        return "Visual"
+    if group == "question":
+        return "Question"
+    if group == "assistant_marker":
+        return "Template Suffix"
+    raise ValueError(
+        f"Cannot map token position {token['token_position']} with "
+        f"token_group={group!r}, token_type={token['token_type']!r}."
+    )
 
 
 def _llava_visual_geometry(processor: Any, spans: Dict[str, Any]) -> Dict[str, Any]:
@@ -165,6 +200,39 @@ def _llava_visual_geometry(processor: Any, spans: Dict[str, Any]) -> Dict[str, A
         "crop_height": crop_h,
         "crop_width": crop_w,
         "shortest_edge": shortest_edge,
+    }
+
+
+def _qwen_visual_geometry(
+    processor: Any,
+    inputs: Dict[str, Any],
+    spans: Dict[str, Any],
+) -> Dict[str, Any]:
+    image_grid_thw = inputs.get("image_grid_thw")
+    if image_grid_thw is None:
+        raise RuntimeError("Qwen inputs do not contain image_grid_thw.")
+    grid = [int(x) for x in image_grid_thw.detach().cpu().reshape(-1, 3)[0].tolist()]
+    image_processor = getattr(processor, "image_processor", None)
+    merge_size = int(getattr(image_processor, "merge_size", 1) or 1)
+    t, grid_h, grid_w = grid
+    rows = grid_h // merge_size
+    cols = grid_w // merge_size
+    mappable = t * rows * cols
+    expected = max(0, int(spans.get("num_visual_tokens", 0)) - 2)
+    if t != 1 or rows <= 0 or cols <= 0 or mappable != expected:
+        raise RuntimeError(
+            "Qwen visual geometry does not match the recovered visual span: "
+            f"grid={grid}, merge_size={merge_size}, mappable={mappable}, expected={expected}."
+        )
+    return {
+        "family": "qwen",
+        "source": "Qwen image_grid_thw-derived merged grid",
+        "image_grid_thw": grid,
+        "merge_size": merge_size,
+        "grid_rows": rows,
+        "grid_cols": cols,
+        "mappable_visual_tokens": mappable,
+        "visual_token_offset": 1,
     }
 
 
@@ -218,14 +286,32 @@ def _visual_rect_for_position(
     pos: int,
     spans: Dict[str, Any],
     geometry: Dict[str, Any],
-) -> Tuple[Tuple[int, int, int, int], Dict[str, int]]:
+) -> Tuple[Optional[Tuple[int, int, int, int]], Dict[str, int]]:
     visual_rel = pos - int(spans["visual_start"])
     rows = int(geometry["grid_rows"])
     cols = int(geometry["grid_cols"])
-    row = min(rows - 1, max(0, visual_rel // cols))
-    col = min(cols - 1, max(0, visual_rel % cols))
-    rect = _llava_clip_rect(image_size, row, col, rows, cols, geometry)
-    return rect, {"visual_rel_pos": visual_rel, "grid_row": row, "grid_col": col}
+    image_rel = visual_rel - int(geometry.get("visual_token_offset", 0))
+    mappable = int(geometry.get("mappable_visual_tokens", rows * cols))
+    if image_rel < 0 or image_rel >= mappable:
+        return None, {"visual_rel_pos": visual_rel, "image_rel_pos": image_rel}
+    row = min(rows - 1, max(0, image_rel // cols))
+    col = min(cols - 1, max(0, image_rel % cols))
+    if geometry.get("family") == "qwen":
+        width, height = image_size
+        rect = (
+            math.floor(col * width / cols),
+            math.floor(row * height / rows),
+            math.ceil((col + 1) * width / cols),
+            math.ceil((row + 1) * height / rows),
+        )
+    else:
+        rect = _llava_clip_rect(image_size, row, col, rows, cols, geometry)
+    return rect, {
+        "visual_rel_pos": visual_rel,
+        "image_rel_pos": image_rel,
+        "grid_row": row,
+        "grid_col": col,
+    }
 
 
 def _token_records(processor: Any, input_ids: torch.Tensor, spans: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -233,11 +319,21 @@ def _token_records(processor: Any, input_ids: torch.Tensor, spans: Dict[str, Any
     token_strings = processor.tokenizer.convert_ids_to_tokens(token_ids)
     records: List[Dict[str, Any]] = []
     visual_start = int(spans["visual_start"])
+    qwen_visual_span = (
+        visual_start < len(token_strings)
+        and str(token_strings[visual_start]) == "<|vision_start|>"
+    )
     for pos, (token_id, token) in enumerate(zip(token_ids, token_strings)):
         span = _classify_position(pos, spans)
         decoded = _decode_token_piece(processor, token_id, str(token))
         if span == "visual":
-            display = f"V{pos - visual_start:03d}"
+            if str(token) == "<|vision_start|>":
+                display = "[VIS_START]"
+            elif str(token) == "<|vision_end|>":
+                display = "[VIS_END]"
+            else:
+                visual_offset = 1 if qwen_visual_span else 0
+                display = f"V{pos - visual_start - visual_offset:03d}"
         else:
             display = _visible_token_text(decoded, str(token))
         item = {
@@ -251,6 +347,7 @@ def _token_records(processor: Any, input_ids: torch.Tensor, spans: Dict[str, Any
             "token_group": span,
         }
         item["token_type"] = _token_type(pos, item, spans)
+        item["token_span"] = _token_span(item)
         records.append(item)
     return records
 
@@ -336,6 +433,7 @@ def _capture_gradient_scores(
     objective: str,
     yes_ids: List[int],
     no_ids: List[int],
+    degraded_fused: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[int, float], Dict[str, float]]:
     decoder_layers = _get_decoder_layers(model, vlm_adapter)
     target_layer = decoder_layers[code_layer_idx]
@@ -360,10 +458,23 @@ def _capture_gradient_scores(
     handle = target_layer.register_forward_hook(_hook)
     try:
         with torch.enable_grad():
-            outputs = model(**degraded_inputs, return_dict=True)
+            cache_context = (
+                qwen_vision_cache_context(model, degraded_fused)
+                if degraded_fused is not None
+                else nullcontext()
+            )
+            with cache_context:
+                outputs = model(**degraded_inputs, return_dict=True)
             logits = outputs.logits[0, prompt_len - 1, :]
             yes_prob, no_prob = _yes_no_probs_from_logits(logits, yes_ids, no_ids)
-            scalar = yes_prob - no_prob if objective == "answer" else yes_prob
+            if objective == "answer":
+                scalar = yes_prob - no_prob
+            elif objective in {"confidence", "maximize_p_yes"}:
+                scalar = yes_prob
+            elif objective == "maximize_p_no":
+                scalar = no_prob
+            else:
+                raise ValueError(f"Unsupported gradient objective: {objective}")
             scalar.backward()
     finally:
         handle.remove()
@@ -425,6 +536,7 @@ def _exact_patch_eval(
     clean_answer_text: str,
     baseline_clean: Dict[str, Any],
     baseline_degraded: Dict[str, Any],
+    degraded_fused: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     trial_positions = selected_positions + [candidate_pos]
     clean_activations = clean_layer_h[trial_positions, :]
@@ -440,6 +552,8 @@ def _exact_patch_eval(
             layer_idx=code_layer_idx,
             positions=trial_positions,
             clean_activations=clean_activations,
+            fused_bundle=degraded_fused,
+            qwen_prefill_empty_thinking=cfg.qwen_prefill_empty_thinking,
         )
     stats = _stats_from_forward(patched_fwd, processor, record, cfg, clean_answer_text)
     stats["answer_recovered"] = stats["answer_bucket"] == "yes"
@@ -464,6 +578,18 @@ def _candidate_sort_key(
 ) -> Tuple[Any, ...]:
     p_clean = _safe_float(row["p_clean"])
     margin = _safe_float(row["yes_no_margin"])
+    if run_type == "maximize_p_yes":
+        return (
+            _safe_float(row["p_yes"]),
+            _safe_float(row.get("gradient_score")),
+            -int(row["candidate_position"]),
+        )
+    if run_type == "maximize_p_no":
+        return (
+            _safe_float(row["p_no"]),
+            _safe_float(row.get("gradient_score")),
+            -int(row["candidate_position"]),
+        )
     if run_type == "answer_recovery":
         return (
             bool(row["answer_recovered"]),
@@ -481,6 +607,18 @@ def _candidate_sort_key(
         _safe_float(row.get("gradient_score")),
         -int(row["candidate_position"]),
     )
+
+
+def _objective_value(stats: Dict[str, Any], run_type: str) -> float:
+    if run_type == "maximize_p_yes":
+        return _safe_float(stats["p_yes"])
+    if run_type == "maximize_p_no":
+        return _safe_float(stats["p_no"])
+    if run_type == "confidence_recovery":
+        return _safe_float(stats["p_clean"])
+    if run_type == "answer_recovery":
+        return _safe_float(stats["yes_no_margin"])
+    raise ValueError(f"Unsupported run type: {run_type}")
 
 
 def _run_one_greedy_path(
@@ -507,14 +645,20 @@ def _run_one_greedy_path(
     clean_answer_text: str,
     baseline_clean: Dict[str, Any],
     baseline_degraded: Dict[str, Any],
+    degraded_fused: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     selected_positions: List[int] = []
     selected_rows: List[Dict[str, Any]] = []
     candidate_rows: List[Dict[str, Any]] = []
     current_p_clean = baseline_degraded["p_clean"]
     current_margin = baseline_degraded["yes_no_margin"]
+    current_objective = _objective_value(baseline_degraded, run_type)
+    objective_deltas: List[float] = []
     stopped_reason = "max_patches"
-    objective = "answer" if run_type == "answer_recovery" else "confidence"
+    objective = "answer" if run_type == "answer_recovery" else run_type
+    if run_type == "confidence_recovery":
+        objective = "confidence"
+    generalized_objective = run_type in {"maximize_p_yes", "maximize_p_no"}
 
     for step_idx in range(1, cfg.max_patches + 1):
         gradient_scores, gradient_meta = _capture_gradient_scores(
@@ -528,6 +672,7 @@ def _run_one_greedy_path(
             objective=objective,
             yes_ids=yes_ids,
             no_ids=no_ids,
+            degraded_fused=degraded_fused,
         )
         pool = _candidate_pool(
             gradient_scores,
@@ -562,6 +707,7 @@ def _run_one_greedy_path(
                 clean_answer_text=clean_answer_text,
                 baseline_clean=baseline_clean,
                 baseline_degraded=baseline_degraded,
+                degraded_fused=degraded_fused,
             )
             token = token_records[candidate_pos]
             row = {
@@ -576,6 +722,7 @@ def _run_one_greedy_path(
                 "candidate_token_id": token["token_id"],
                 "candidate_span_label": token["span_label"],
                 "candidate_token_type": token["token_type"],
+                "candidate_token_span": token["token_span"],
                 "gradient_score": gradient_scores.get(candidate_pos, float("nan")),
                 "gradient_rank": gradient_rank.get(candidate_pos),
                 "pool_size": len(pool),
@@ -583,6 +730,12 @@ def _run_one_greedy_path(
                 **gradient_meta,
                 **stats,
             }
+            row["objective_name"] = run_type
+            row["objective_value_before"] = current_objective
+            row["objective_value_after"] = _objective_value(stats, run_type)
+            row["signed_incremental_objective_improvement"] = (
+                row["objective_value_after"] - current_objective
+            )
             exact_rows.append(row)
             candidate_rows.append(row.copy())
 
@@ -598,6 +751,9 @@ def _run_one_greedy_path(
             stopped_reason = "no_confidence_improvement"
             break
 
+        objective_before = current_objective
+        objective_after = _objective_value(best, run_type)
+        signed_delta = objective_after - objective_before
         selected_positions.append(int(best["candidate_position"]))
         token = token_records[int(best["candidate_position"])]
         selected_row = {
@@ -617,6 +773,7 @@ def _run_one_greedy_path(
             "span_label": token["span_label"],
             "token_group": token["token_group"],
             "token_type": token["token_type"],
+            "token_span": token["token_span"],
             "selected_positions": json.dumps(selected_positions),
             "selected_token_texts": json.dumps([token_records[p]["token_text"] for p in selected_positions]),
             "selected_token_groups": json.dumps([token_records[p]["token_group"] for p in selected_positions]),
@@ -635,11 +792,36 @@ def _run_one_greedy_path(
             "score": best["score"],
             "top1_probability": best["top1_probability"],
             "answer_geom_mean_probability": best.get("answer_geom_mean_probability"),
+            "given_generated_answer_confidence": best.get("answer_geom_mean_probability"),
+            "objective_name": run_type,
+            "objective_value_before": objective_before,
+            "objective_value_after": objective_after,
+            "signed_incremental_objective_improvement": signed_delta,
+            "positive_incremental_objective_improvement": max(0.0, signed_delta),
+            "negative_incremental_objective_improvement": min(0.0, signed_delta),
+            "generated_answer_is_yes": best["answer_bucket"] == "yes",
+            "generated_answer_is_no": best["answer_bucket"] == "no",
+            "generated_answer_matches_clean": best["answer_bucket"] == "yes",
+            "generated_answer_matches_corrupted": best["answer_bucket"] == "no",
+            "early_stopping_triggered": False,
+            "number_patch_steps_used": None,
             "stopped_reason": "",
         }
         selected_rows.append(selected_row)
         current_p_clean = _safe_float(best["p_clean"])
         current_margin = _safe_float(best["yes_no_margin"])
+        current_objective = objective_after
+        objective_deltas.append(signed_delta)
+
+        if (
+            generalized_objective
+            and cfg.early_stop_window > 0
+            and len(objective_deltas) >= cfg.early_stop_window
+            and sum(abs(delta) for delta in objective_deltas[-cfg.early_stop_window :])
+            < cfg.early_stop_abs_sum_threshold
+        ):
+            stopped_reason = "rolling_abs_objective_change_below_threshold"
+            break
 
         if run_type == "answer_recovery" and bool(best["answer_recovered"]):
             stopped_reason = "answer_recovered"
@@ -649,7 +831,11 @@ def _run_one_greedy_path(
             break
 
     if selected_rows:
-        selected_rows[-1]["stopped_reason"] = stopped_reason
+        early_stopped = stopped_reason == "rolling_abs_objective_change_below_threshold"
+        for row in selected_rows:
+            row["early_stopping_triggered"] = early_stopped
+            row["number_patch_steps_used"] = len(selected_rows)
+            row["stopped_reason"] = stopped_reason
     return selected_rows, candidate_rows
 
 
@@ -668,6 +854,26 @@ def _load_selected_record(patching_dataset: str, cfg: GradientGuidedTokenPatchin
             raise ValueError(
                 "This pilot is configured for clean/correct yes POPE samples only; "
                 f"got correct_answer={answer!r}, clean_prediction={clean_pred!r}."
+            )
+    if cfg.require_corrupted_no:
+        perturbation = next(
+            (
+                item
+                for item in record.get("visual_perturbations", [])
+                if str(item.get("severity")) == cfg.severity
+            ),
+            None,
+        )
+        if perturbation is None:
+            raise ValueError(f"Sample {cfg.sample_id} has no {cfg.severity!r} perturbation.")
+        corrupted_pred = _extract_yes_no_answer(
+            str(perturbation.get("model_prediction", ""))
+        ).lower()
+        if corrupted_pred != "no" or bool(perturbation.get("model_correct", True)):
+            raise ValueError(
+                "This run requires an incorrect corrupted no answer; "
+                f"got prediction={corrupted_pred!r}, "
+                f"model_correct={perturbation.get('model_correct')!r}."
             )
     return record
 
@@ -715,6 +921,8 @@ def _image_with_numbered_visual_patches(
             spans,
             geometry,
         )
+        if rect is None:
+            continue
         x0, y0, x1, y1 = rect
         scaled_rects.append((x0, y0, x1, y1, int(row["patch_order"])))
 
@@ -869,7 +1077,11 @@ def _save_figure(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig_dir = output_dir / "figures"
+    objective_dir = {
+        "maximize_p_yes": "obj_yes",
+        "maximize_p_no": "obj_no",
+    }.get(run_type)
+    fig_dir = output_dir / objective_dir if objective_dir else output_dir / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
     clean_path = str(record["clean_image_path"])
     degraded_path = _severity_image(record, cfg.severity)
@@ -886,10 +1098,10 @@ def _save_figure(
     fig = plt.figure(figsize=(16, 10.5), facecolor="white")
     gs = fig.add_gridspec(3, 3, height_ratios=[1.15, 0.95, 0.9], hspace=0.24, wspace=0.12)
     image_axes = [fig.add_subplot(gs[0, idx]) for idx in range(3)]
-    for ax, title, source, answer, p_yes in [
-        (image_axes[0], "Clean", clean_path, baseline_clean["predicted_answer"], baseline_clean["p_clean"]),
-        (image_axes[1], "Corrupted", degraded_path, baseline_degraded["predicted_answer"], baseline_degraded["p_clean"]),
-        (image_axes[2], "Final Patched", patched_image, final.get("predicted_answer", ""), final.get("p_clean", float("nan"))),
+    for ax, title, source, stats in [
+        (image_axes[0], "Clean", clean_path, baseline_clean),
+        (image_axes[1], "Corrupted", degraded_path, baseline_degraded),
+        (image_axes[2], "Final Patched", patched_image, final),
     ]:
         ax.axis("off")
         if isinstance(source, Image.Image):
@@ -897,7 +1109,13 @@ def _save_figure(
         else:
             image = Image.open(str(source)).convert("RGB")
         ax.imshow(image)
-        ax.set_title(f"{title}\nanswer={answer} | P(Yes)={_format_prob(p_yes)}", fontsize=12, weight="bold")
+        ax.set_title(
+            f"{title}\nanswer={stats.get('predicted_answer', '')} | "
+            f"P(Yes)={_format_prob(stats.get('p_yes'))} | "
+            f"P(No)={_format_prob(stats.get('p_no'))}",
+            fontsize=12,
+            weight="bold",
+        )
         if not isinstance(source, Image.Image):
             image.close()
 
@@ -908,40 +1126,68 @@ def _save_figure(
 
     ax_table = fig.add_subplot(gs[2, :])
     ax_table.axis("off")
+    generalized_objective = run_type in {"maximize_p_yes", "maximize_p_no"}
     table_rows = []
     for row in selected_steps:
-        table_rows.append(
-            [
-                int(row["patch_order"]),
-                f"{row['token_position']} / {row['token_text']}",
-                row["token_group"],
-                row["token_type"],
-                row["predicted_answer"],
-                "yes" if row["clean_answer_recovered"] else "no",
-                _format_prob(row["answer_recovery"]),
-                _format_prob(row["p_clean"]),
-                _format_prob(row["p_clean_recovery"]),
-            ]
-        )
+        if generalized_objective:
+            table_rows.append(
+                [
+                    int(row["patch_order"]),
+                    f"{row['token_position']} / {row['token_text']}",
+                    row["token_span"],
+                    row["token_type"],
+                    row["predicted_answer"],
+                    _format_prob(row["objective_value_before"]),
+                    _format_prob(row["objective_value_after"]),
+                    _format_prob(row["signed_incremental_objective_improvement"]),
+                    _format_prob(row["p_yes"]),
+                    _format_prob(row["p_no"]),
+                ]
+            )
+        else:
+            table_rows.append(
+                [
+                    int(row["patch_order"]),
+                    f"{row['token_position']} / {row['token_text']}",
+                    row["token_group"],
+                    row["token_type"],
+                    row["predicted_answer"],
+                    "yes" if row["clean_answer_recovered"] else "no",
+                    _format_prob(row["answer_recovery"]),
+                    _format_prob(row["p_clean"]),
+                    _format_prob(row["p_clean_recovery"]),
+                ]
+            )
+    if generalized_objective:
+        col_labels = ["#", "token", "span", "type", "answer", "obj. before", "obj. after", "signed delta", "P(Yes)", "P(No)"]
+        col_widths = [0.035, 0.16, 0.13, 0.16, 0.11, 0.09, 0.09, 0.08, 0.07, 0.07]
+    else:
+        col_labels = ["#", "token", "group", "type", "answer", "recovered", "ans rec.", "P(Yes)", "P rec."]
+        col_widths = [0.04, 0.18, 0.11, 0.18, 0.12, 0.09, 0.08, 0.08, 0.08]
     if not table_rows:
-        table_rows = [["-", "-", "-", "-", "-", "no", "0.000", _format_prob(baseline_degraded["p_clean"]), "0.000"]]
+        table_rows = [["-"] * len(col_labels)]
     table = ax_table.table(
         cellText=table_rows,
-        colLabels=["#", "token", "group", "type", "answer", "recovered", "ans rec.", "P(Yes)", "P rec."],
+        colLabels=col_labels,
         loc="upper left",
         cellLoc="left",
-        colWidths=[0.04, 0.18, 0.11, 0.18, 0.12, 0.09, 0.08, 0.08, 0.08],
+        colWidths=col_widths,
     )
     table.auto_set_font_size(False)
     table.set_fontsize(9)
     table.scale(1, 1.25)
     title_run = run_type.replace("_", " ")
+    model_label = "Qwen3.5-9B" if geometry.get("family") == "qwen" else "LLaVA"
     fig.suptitle(
-        f"LLaVA POPE sample {cfg.sample_id} | requested layer {human_layer} | {title_run}",
+        f"{model_label} POPE sample {cfg.sample_id} | requested layer {human_layer} | {title_run}",
         fontsize=16,
         weight="bold",
     )
-    stem = f"llava_pope_sample_{cfg.sample_id}_layer_{human_layer}_{run_type}"
+    stem = (
+        f"layer{human_layer}"
+        if generalized_objective
+        else f"llava_pope_sample_{cfg.sample_id}_layer_{human_layer}_{run_type}"
+    )
     fig.savefig(fig_dir / f"{stem}.png", dpi=300, bbox_inches="tight")
     fig.savefig(fig_dir / f"{stem}.pdf", bbox_inches="tight")
     plt.close(fig)
@@ -993,6 +1239,44 @@ def _write_summary(output_dir: Path, selected_rows: List[Dict[str, Any]]) -> Non
             f.write(f"- Same first patch: {bool(row['same_first_patch'])}\n\n")
 
 
+def _baseline_rows(
+    cfg: GradientGuidedTokenPatchingConfig,
+    baseline_clean: Dict[str, Any],
+    baseline_degraded: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for human_layer, code_layer_idx in zip(cfg.human_layers, cfg.code_layers):
+        for run_type in cfg.run_types:
+            rows.append(
+                {
+                    "sample_id": cfg.sample_id,
+                    "severity": cfg.severity,
+                    "requested_layer": human_layer,
+                    "code_layer_idx": code_layer_idx,
+                    "objective_name": run_type,
+                    "clean_generated_answer": baseline_clean["predicted_answer"],
+                    "corrupted_generated_answer": baseline_degraded["predicted_answer"],
+                    "clean_answer_bucket": baseline_clean["answer_bucket"],
+                    "corrupted_answer_bucket": baseline_degraded["answer_bucket"],
+                    "clean_p_yes": baseline_clean["p_yes"],
+                    "corrupted_p_yes": baseline_degraded["p_yes"],
+                    "clean_p_no": baseline_clean["p_no"],
+                    "corrupted_p_no": baseline_degraded["p_no"],
+                    "clean_given_generated_answer_confidence": baseline_clean.get(
+                        "answer_geom_mean_probability"
+                    ),
+                    "corrupted_given_generated_answer_confidence": baseline_degraded.get(
+                        "answer_geom_mean_probability"
+                    ),
+                    "clean_top1_probability": baseline_clean.get("top1_probability"),
+                    "corrupted_top1_probability": baseline_degraded.get("top1_probability"),
+                    "clean_objective_value": _objective_value(baseline_clean, run_type),
+                    "corrupted_objective_value": _objective_value(baseline_degraded, run_type),
+                }
+            )
+    return rows
+
+
 def run_gradient_guided_token_patching(
     *,
     model: Any,
@@ -1022,6 +1306,11 @@ def run_gradient_guided_token_patching(
     print(f"  code layers:     {cfg.code_layers}")
     print(f"  visual top-k:    {cfg.visual_top_k}")
     print(f"  max patches:     {cfg.max_patches}")
+    print(f"  objectives:      {cfg.run_types}")
+    print(
+        f"  early stopping:  window={cfg.early_stop_window}, "
+        f"abs-sum threshold={cfg.early_stop_abs_sum_threshold}"
+    )
     print(f"  output:          {output_path}")
 
     clean_image = Image.open(record["clean_image_path"]).convert("RGB")
@@ -1035,12 +1324,60 @@ def run_gradient_guided_token_patching(
         vlm_adapter=vlm_adapter,
         image=clean_image,
         prompt=prompt,
+        qwen_prefill_empty_thinking=cfg.qwen_prefill_empty_thinking,
     )
-    clean_inputs = prepare_inputs(vlm_adapter, processor, clean_image, prompt, device)
-    degraded_inputs = prepare_inputs(vlm_adapter, processor, degraded_image, prompt, device)
+    clean_inputs = prepare_inputs(
+        vlm_adapter,
+        processor,
+        clean_image,
+        prompt,
+        device,
+        qwen_prefill_empty_thinking=cfg.qwen_prefill_empty_thinking,
+    )
+    degraded_inputs = prepare_inputs(
+        vlm_adapter,
+        processor,
+        degraded_image,
+        prompt,
+        device,
+        qwen_prefill_empty_thinking=cfg.qwen_prefill_empty_thinking,
+    )
+    use_fused = vlm_adapter.family == "qwen"
+    clean_fused = (
+        prepare_qwen_fused_inputs_embeds(
+            model,
+            vlm_adapter,
+            processor,
+            clean_image,
+            prompt,
+            device,
+            qwen_prefill_empty_thinking=cfg.qwen_prefill_empty_thinking,
+        )
+        if use_fused
+        else None
+    )
+    degraded_fused = (
+        prepare_qwen_fused_inputs_embeds(
+            model,
+            vlm_adapter,
+            processor,
+            degraded_image,
+            prompt,
+            device,
+            qwen_prefill_empty_thinking=cfg.qwen_prefill_empty_thinking,
+        )
+        if use_fused
+        else None
+    )
+    if degraded_fused is not None:
+        degraded_inputs = degraded_fused["inputs"]
     input_ids = clean_inputs["input_ids"][0].detach().cpu()
     token_records = _token_records(processor, input_ids, spans)
-    geometry = _llava_visual_geometry(processor, spans)
+    geometry = (
+        _qwen_visual_geometry(processor, clean_inputs, spans)
+        if vlm_adapter.family == "qwen"
+        else _llava_visual_geometry(processor, spans)
+    )
     spans["visual_geometry"] = geometry
     all_positions, visual_positions, non_visual_positions = _positions_for_pool(spans)
     yes_ids, no_ids = _pope_token_ids(processor)
@@ -1054,6 +1391,8 @@ def run_gradient_guided_token_patching(
             image=clean_image,
             prompt=prompt,
             max_new_tokens=max_new_tokens,
+            fused_bundle=clean_fused,
+            qwen_prefill_empty_thinking=cfg.qwen_prefill_empty_thinking,
         )
         degraded_fwd = _run_baseline_forward(
             model=model,
@@ -1063,6 +1402,8 @@ def run_gradient_guided_token_patching(
             image=degraded_image,
             prompt=prompt,
             max_new_tokens=max_new_tokens,
+            fused_bundle=degraded_fused,
+            qwen_prefill_empty_thinking=cfg.qwen_prefill_empty_thinking,
         )
     baseline_clean = _stats_from_forward(clean_fwd, processor, record, cfg, clean_answer_text)
     baseline_degraded = _stats_from_forward(degraded_fwd, processor, record, cfg, clean_answer_text)
@@ -1076,6 +1417,11 @@ def run_gradient_guided_token_patching(
         "severity": cfg.severity,
         "requested_layers": cfg.human_layers,
         "code_layers": cfg.code_layers,
+        "objectives": cfg.run_types,
+        "early_stop_window": cfg.early_stop_window,
+        "early_stop_abs_sum_threshold": cfg.early_stop_abs_sum_threshold,
+        "model_family": vlm_adapter.family,
+        "qwen_prefill_empty_thinking": cfg.qwen_prefill_empty_thinking,
         "prompt_len": spans["prompt_len"],
         "visual_start": spans["visual_start"],
         "visual_end": spans["visual_end"],
@@ -1091,9 +1437,13 @@ def run_gradient_guided_token_patching(
 
     selected_rows_all: List[Dict[str, Any]] = []
     candidate_rows_all: List[Dict[str, Any]] = []
+    baseline_rows = _baseline_rows(cfg, baseline_clean, baseline_degraded)
+    _save_table(baseline_rows, output_path / "gradient_guided_objective_baselines")
+    total_paths = len(cfg.human_layers) * len(cfg.run_types)
+    completed_paths = 0
     for human_layer, code_layer_idx in zip(cfg.human_layers, cfg.code_layers):
         clean_layer_h = all_layer_h[code_layer_idx]
-        for run_type in ("answer_recovery", "confidence_recovery"):
+        for run_type in cfg.run_types:
             print(f"[grad-token] layer {human_layer} ({code_layer_idx}) / {run_type}", flush=True)
             selected_rows, candidate_rows = _run_one_greedy_path(
                 model=model,
@@ -1118,9 +1468,12 @@ def run_gradient_guided_token_patching(
                 clean_answer_text=clean_answer_text,
                 baseline_clean=baseline_clean,
                 baseline_degraded=baseline_degraded,
+                degraded_fused=degraded_fused,
             )
             selected_rows_all.extend(selected_rows)
             candidate_rows_all.extend(candidate_rows)
+            _save_table(selected_rows_all, output_path / "gradient_guided_selected_steps")
+            completed_paths += 1
             if cfg.make_figures:
                 _save_figure(
                     output_dir=output_path,
@@ -1140,14 +1493,23 @@ def run_gradient_guided_token_patching(
                 print(
                     "  selected "
                     f"{[row['token_position'] for row in selected_rows]} "
-                    f"groups={[row['token_group'] for row in selected_rows]} "
-                    f"stop={last['stopped_reason']} p_yes={last['p_clean']:.4f}",
+                    f"spans={[row['token_span'] for row in selected_rows]} "
+                    f"stop={last['stopped_reason']} "
+                    f"p_yes={last['p_yes']:.4f} p_no={last['p_no']:.4f}",
                     flush=True,
                 )
+            elapsed = time.time() - t0
+            eta_seconds = (elapsed / completed_paths) * (total_paths - completed_paths)
+            print(
+                f"  progress={completed_paths}/{total_paths} "
+                f"elapsed={elapsed / 60:.1f}m eta={eta_seconds / 60:.1f}m",
+                flush=True,
+            )
 
     _save_table(selected_rows_all, output_path / "gradient_guided_selected_steps")
     _save_table(candidate_rows_all, output_path / "gradient_guided_candidate_audit")
-    _write_summary(output_path, selected_rows_all)
+    if {"answer_recovery", "confidence_recovery"}.issubset(set(cfg.run_types)):
+        _write_summary(output_path, selected_rows_all)
 
     clean_image.close()
     degraded_image.close()

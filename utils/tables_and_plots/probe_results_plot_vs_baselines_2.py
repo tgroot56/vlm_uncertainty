@@ -769,340 +769,66 @@ def plot_question_context(df: pd.DataFrame, dataset: str):
 # -----------------------
 # 5. COMBINED LAYER DIFFERENCES (MLP)
 # -----------------------
-def plot_combined_layer_differences(dfs: dict[str, pd.DataFrame], datasets: list[str]):
-    fig, axes = plt.subplots(1, len(datasets), figsize=(8 * len(datasets), 6), sharey=True)
-    if len(datasets) == 1:
-        axes = [axes]
-    probe_type = "mlp"
-    
-    for ax_idx, dataset in enumerate(datasets):
-        ax = axes[ax_idx]
-        df = dfs.get(dataset)
-        
-        if df is None:
-            ax.text(0.5, 0.5, "Data not available", ha='center')
-            continue
-
-        # Filter logic (same as plot_layer_differences)
-        mask = df['feature_label'].str.contains('_mean_layer_')
-        mask &= ~df['feature_label'].str.contains('including')
-        subset = df[mask].copy()
-        
-        if subset.empty:
-            continue
-
-        subset['Base_Feature'] = subset['feature_label'].apply(lambda x: x.split('_mean_')[0])
-        subset['Layer'] = subset['feature_label'].apply(lambda x: 'Final Layer' if '-1' in x else 'Middle Layer')
-
-        name_map = {
-            'vision': 'Vision',
-            'lm_visual': 'LM Visual',
-            'lm_answer': 'LM Answer',
-            'lm_question': 'LM Question',
-            'lm_fullspan': 'LM Fullspan'
-        }
-        subset['Base_Feature_Name'] = subset['Base_Feature'].map(name_map)
-        
-        x_order = ['Vision', 'LM Visual', 'LM Answer', 'LM Question', 'LM Fullspan']
-        x_labels = [l for l in x_order if l in subset['Base_Feature_Name'].unique()]
-        
-        # Explicit sorting: Middle Layer first, then Final Layer
-        groups = ['Middle Layer', 'Final Layer']
-        
-        x = np.arange(len(x_labels))
-        width = 0.8 / len(groups)
-        no_skill = get_no_skill_brier(dataset)
-        if np.isfinite(no_skill):
-            ax.axhspan(0, no_skill, alpha=0.06, color='gray')
-            ax.axhline(no_skill, linestyle="--", linewidth=2, color='black', label="No-skill baseline")
-
-        for i, group in enumerate(groups):
-            group_data = subset[subset['Layer'] == group].drop_duplicates(subset=['Base_Feature_Name']).set_index('Base_Feature_Name')
-            
-            y_true = np.array([group_data.loc[label, f"{probe_type}_true"] if label in group_data.index else np.nan for label in x_labels], dtype=float)
-            y_shuf = np.array([group_data.loc[label, f"{probe_type}_shuffle"] if label in group_data.index else np.nan for label in x_labels], dtype=float)
-            y_extra = y_shuf - y_true
-            
-            offset = (i - len(groups) / 2 + 0.5) * width
-            
-            bars = ax.bar(x + offset, y_true, width, label=group)
-            colors = [b.get_facecolor() for b in bars]
-            
-            shuf_label = "Shuffled-label control" if i == 0 else ""
-            ax.bar(x + offset, y_extra, width, bottom=y_true, hatch="//", alpha=0.6, color=colors, label=shuf_label)
-
-        ax.set_title(dataset_display_name(dataset), fontsize=AX_TITLE_FONTSIZE, fontweight="bold")
-        ax.set_xticks(x)
-        ax.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=TICK_LABEL_FONTSIZE)
-        ax.tick_params(axis="y", labelsize=TICK_LABEL_FONTSIZE)
-        ax.set_ylim(0.00, 0.45)
-        ax.set_yticks(np.arange(0.00, 0.46, 0.05))
-        ax.grid(axis='y', linestyle='--', alpha=0.6)
-        
-        if ax_idx == 0:
-            ax.set_ylabel("Brier Score (Lower is better)", fontsize=AX_LABEL_FONTSIZE)
-            
-        handles, labels = ax.get_legend_handles_labels()
-        by_label = dict(zip(labels, handles))
-        ax.legend(by_label.values(), by_label.keys(), loc='upper right', fontsize=LEGEND_FONTSIZE)
-
-    plt.suptitle(
-        "Network Depth: Middle vs Final Layer (Mean Aggregation) - MLP Probe",
-        fontsize=FIG_TITLE_FONTSIZE,
-        y=1.04,
-    )
-    plt.tight_layout()
-    save_plot(fig, "_combined", "combined_layer_differences_mlp.pdf", probe_type="mlp")
-
-
-def plot_all_datasets_component_comparison_mlp(
+def plot_model_comparison_component_comparison_mlp(
     dfs: dict[str, pd.DataFrame],
-    model: str,
-    datasets: list[str],
+    columns: Optional[list[tuple[str, str]]] = None,
+    output_name: str = "model_comparison_component_comparison_mlp",
+    title: str = "Component Comparison - MLP Probe",
+    *,
+    style: Optional[dict[str, float]] = None,
+    text: Optional[dict[str, object]] = None,
+    layout: Optional[dict[str, object]] = None,
 ) -> None:
-    selected_features = {
-        'vision_mean_layer_-1': 'Vision (mean)',
-        'lm_visual_mean_layer_-1': 'Lm Visual (mean)',
-        'lm_question_lasttok_layer_-1': 'LM Question (lasttok)',
-        'lm_fullspan_lasttok_layer_-1': 'LM Final Token',
-        'lm_answer_lasttok_layer_-1': 'LM Answer (lasttok)',
-        'answer_gen_entropy_mean': 'Entropy (mean)',
-        'answer_gen_neglogp_mean': 'NegLogP (mean)',
-    }
+    style = style or {}
+    text = text or {}
+    layout = layout or {}
+
+    selected_features = text.get("feature_labels", {
+        "vision_mean_layer_-1": "Vision (mean)",
+        "lm_visual_mean_layer_-1": "Lm Visual (mean)",
+        "lm_question_lasttok_layer_-1": "LM Question (lasttok)",
+        "lm_fullspan_lasttok_layer_-1": "LM Final Token",
+        "lm_answer_lasttok_layer_-1": "LM Answer (lasttok)",
+        "answer_gen_entropy_mean": "Entropy (mean)",
+        "answer_gen_neglogp_mean": "NegLogP (mean)",
+    })
     components = list(selected_features.values())
     probe_type = "mlp"
 
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12), sharex=True, sharey=True)
-    axes = axes.ravel()
+    if columns is None:
+        columns = text.get("columns", [
+            ("vqa-v2", "VQA-v2"),
+            ("coco-qa-vi", "COCO-QA"),
+            ("pope/random", "POPE"),
+            ("imagenet-r", "ImageNet-R"),
+        ])
 
-    for ax_idx, dataset in enumerate(datasets):
-        ax = axes[ax_idx]
-        df = dfs.get(dataset)
+    rows = text.get("rows", [("llava", "LLaVA"), ("qwen", "Qwen")])
+    legend_labels = text.get("legend_labels", {})
+    show_shuffle_control = bool(text.get("show_shuffle_control", True))
+    figure_title = text.get("figure_title", title)
+    y_label_template = text.get("y_label_template", "{model_label}\nBrier Score")
+    data_not_available = text.get("data_not_available", "Data not available")
 
-        if df is None:
-            ax.text(0.5, 0.5, "Data not available", ha="center", va="center")
-            ax.set_axis_off()
-            continue
+    bar_width = layout.get("bar_width", 0.8)
+    group_spacing = layout.get("group_spacing", None)
+    figure_width = layout.get("figure_width", 7 * len(columns))
+    figure_height = layout.get("figure_height", 10)
+    wspace = layout.get("wspace", None)
+    hspace = layout.get("hspace", None)
 
-        subset = df[df["feature_label"].isin(selected_features.keys())].copy()
-        if subset.empty:
-            ax.text(0.5, 0.5, "Data not available", ha="center", va="center")
-            ax.set_axis_off()
-            continue
+    # New configurable axis settings
+    y_limits = layout.get("y_limits", (0.00, 0.45))
+    y_ticks = layout.get("y_ticks", np.arange(0.00, 0.46, 0.05))
 
-        subset["Component"] = subset["feature_label"].map(selected_features)
-        subset_sorted = subset.set_index("Component").reindex(components).dropna(subset=[f"{probe_type}_true"])
-        current_components = subset_sorted.index.tolist()
-
-        no_skill = get_no_skill_brier(dataset)
-        if np.isfinite(no_skill):
-            ax.axhspan(0, no_skill, alpha=0.06, color="gray")
-            ax.axhline(no_skill, linestyle="--", linewidth=2, color="black", label="No-skill baseline")
-
-        y_true = subset_sorted[f"{probe_type}_true"].to_numpy()
-        y_shuf = subset_sorted[f"{probe_type}_shuffle"].to_numpy()
-        y_extra = y_shuf - y_true
-        x = np.arange(len(current_components))
-
-        ax.bar(x, y_true, color="C0", edgecolor="black", label="Probe (true labels)")
-        if np.isfinite(y_extra).any():
-            ax.bar(
-                x,
-                y_extra,
-                bottom=y_true,
-                hatch="//",
-                alpha=0.6,
-                color="C0",
-                edgecolor="black",
-                label="Shuffled-label control",
-            )
-
-        ax.set_title(
-            dataset_display_name(dataset).split(" / ", 1)[-1],
-            fontsize=AX_TITLE_FONTSIZE,
-            fontweight="bold",
-        )
-        ax.set_xticks(x)
-        ax.set_xticklabels(current_components, rotation=45, ha="right", fontsize=TICK_LABEL_FONTSIZE)
-        ax.tick_params(axis="y", labelsize=TICK_LABEL_FONTSIZE)
-        ax.set_ylim(0.00, 0.45)
-        ax.set_yticks(np.arange(0.00, 0.46, 0.05))
-        ax.grid(axis="y", linestyle="--", alpha=0.6)
-
-        if ax_idx in (0, 2):
-            ax.set_ylabel("Brier Score", fontsize=AX_LABEL_FONTSIZE)
-
-        if ax_idx in (0, 1):
-            ax.tick_params(axis="x", labelbottom=False)
-
-    for ax in axes[len(datasets):]:
-        ax.set_axis_off()
-
-    handles, labels = [], []
-    for ax in axes[:len(datasets)]:
-        ax_handles, ax_labels = ax.get_legend_handles_labels()
-        handles.extend(ax_handles)
-        labels.extend(ax_labels)
-    by_label = dict(zip(labels, handles))
-    fig.legend(
-        by_label.values(),
-        by_label.keys(),
-        loc="upper center",
-        ncol=3,
-        bbox_to_anchor=(0.5, 0.955),
-        fontsize=LEGEND_FONTSIZE,
+    fig, axes = plt.subplots(
+        len(rows),
+        len(columns),
+        figsize=(figure_width, figure_height),
+        sharex=True,
+        sharey=True,
+        squeeze=False,
     )
-
-    plt.suptitle(
-        f"{model.upper()} Component Comparison - MLP Probe",
-        fontsize=COMBINED_FIG_TITLE_FONTSIZE,
-        y=1.03,
-    )
-    plt.tight_layout(rect=(0, 0, 1, 0.925))
-
-    outdir = OUTDIR / model / "all_datasets" / "mlp"
-    outdir.mkdir(parents=True, exist_ok=True)
-    outpath = outdir / "1_component_comparison_mlp.pdf"
-    fig.savefig(outpath, format="pdf", bbox_inches="tight")
-    fig.savefig(outpath.with_suffix(".png"), format="png", bbox_inches="tight", dpi=300)
-    plt.close(fig)
-    print(f"[saved] {outpath} (+ png)")
-
-
-def plot_llava_all_datasets_component_comparison_mlp_with_geom_answer_mean(
-    dfs: dict[str, pd.DataFrame],
-    datasets: list[str],
-) -> None:
-    selected_features = {
-        'vision_mean_layer_-1': 'Vision (mean)',
-        'lm_visual_mean_layer_-1': 'Lm Visual (mean)',
-        'lm_question_lasttok_layer_-1': 'LM Question (lasttok)',
-        'lm_fullspan_lasttok_layer_-1': 'LM Final Token',
-        'lm_answer_lasttok_layer_-1': 'LM Answer (lasttok)',
-        GEOM_ANSWER_MEAN_FEATURE: 'Answer geom. mean',
-    }
-    components = list(selected_features.values())
-    probe_type = "mlp"
-
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12), sharex=True, sharey=True)
-    axes = axes.ravel()
-
-    for ax_idx, dataset in enumerate(datasets):
-        ax = axes[ax_idx]
-        df = dfs.get(dataset)
-
-        if df is None:
-            ax.text(0.5, 0.5, "Data not available", ha="center", va="center")
-            ax.set_axis_off()
-            continue
-
-        df = with_geom_answer_mean_row(df, dataset)
-        subset = df[df["feature_label"].isin(selected_features.keys())].copy()
-        if subset.empty:
-            ax.text(0.5, 0.5, "Data not available", ha="center", va="center")
-            ax.set_axis_off()
-            continue
-
-        subset["Component"] = subset["feature_label"].map(selected_features)
-        subset_sorted = subset.set_index("Component").reindex(components).dropna(subset=[f"{probe_type}_true"])
-        current_components = subset_sorted.index.tolist()
-
-        no_skill = get_no_skill_brier(dataset)
-        if np.isfinite(no_skill):
-            ax.axhspan(0, no_skill, alpha=0.06, color="gray")
-            ax.axhline(no_skill, linestyle="--", linewidth=2, color="black", label="No-skill baseline")
-
-        y_true = subset_sorted[f"{probe_type}_true"].to_numpy()
-        y_shuf = subset_sorted[f"{probe_type}_shuffle"].to_numpy()
-        y_extra = y_shuf - y_true
-        x = np.arange(len(current_components))
-
-        ax.bar(x, y_true, color="C0", edgecolor="black", label="Probe (true labels)")
-        if np.isfinite(y_extra).any():
-            ax.bar(
-                x,
-                y_extra,
-                bottom=y_true,
-                hatch="//",
-                alpha=0.6,
-                color="C0",
-                edgecolor="black",
-                label="Shuffled-label control",
-            )
-
-        ax.set_title(
-            dataset_display_name(dataset).split(" / ", 1)[-1],
-            fontsize=AX_TITLE_FONTSIZE,
-            fontweight="bold",
-        )
-        ax.set_xticks(x)
-        ax.set_xticklabels(current_components, rotation=45, ha="right", fontsize=TICK_LABEL_FONTSIZE)
-        ax.tick_params(axis="y", labelsize=TICK_LABEL_FONTSIZE)
-        ax.set_ylim(0.00, 0.45)
-        ax.set_yticks(np.arange(0.00, 0.46, 0.05))
-        ax.grid(axis="y", linestyle="--", alpha=0.6)
-
-        if ax_idx in (0, 2):
-            ax.set_ylabel("Brier Score", fontsize=AX_LABEL_FONTSIZE)
-
-        if ax_idx in (0, 1):
-            ax.tick_params(axis="x", labelbottom=False)
-
-    for ax in axes[len(datasets):]:
-        ax.set_axis_off()
-
-    handles, labels = [], []
-    for ax in axes[:len(datasets)]:
-        ax_handles, ax_labels = ax.get_legend_handles_labels()
-        handles.extend(ax_handles)
-        labels.extend(ax_labels)
-    by_label = dict(zip(labels, handles))
-    fig.legend(
-        by_label.values(),
-        by_label.keys(),
-        loc="upper center",
-        ncol=3,
-        bbox_to_anchor=(0.5, 0.955),
-        fontsize=LEGEND_FONTSIZE,
-    )
-
-    plt.suptitle(
-        "LLAVA Component Comparison - MLP Probe with Geometric Answer Mean",
-        fontsize=COMBINED_FIG_TITLE_FONTSIZE,
-        y=1.03,
-    )
-    plt.tight_layout(rect=(0, 0, 1, 0.925))
-
-    outdir = OUTDIR / "llava" / "all_datasets" / "mlp"
-    outdir.mkdir(parents=True, exist_ok=True)
-    outpath = outdir / "1_component_comparison_mlp_geom_answer_mean.pdf"
-    fig.savefig(outpath, format="pdf", bbox_inches="tight")
-    fig.savefig(outpath.with_suffix(".png"), format="png", bbox_inches="tight", dpi=300)
-    plt.close(fig)
-    print(f"[saved] {outpath} (+ png)")
-
-
-def plot_model_comparison_component_comparison_mlp(dfs: dict[str, pd.DataFrame]) -> None:
-    selected_features = {
-        'vision_mean_layer_-1': 'Vision (mean)',
-        'lm_visual_mean_layer_-1': 'Lm Visual (mean)',
-        'lm_question_lasttok_layer_-1': 'LM Question (lasttok)',
-        'lm_fullspan_lasttok_layer_-1': 'LM Final Token',
-        'lm_answer_lasttok_layer_-1': 'LM Answer (lasttok)',
-        'answer_gen_entropy_mean': 'Entropy (mean)',
-        'answer_gen_neglogp_mean': 'NegLogP (mean)',
-    }
-    components = list(selected_features.values())
-    probe_type = "mlp"
-    columns = [
-        ("vqa-v2", "VQA-v2"),
-        ("coco-qa-vi", "COCO-QA"),
-        ("pope/random", "POPE"),
-        ("imagenet-r", "ImageNet-R"),
-    ]
-    rows = [("llava", "LLaVA"), ("qwen", "Qwen")]
-
-    fig, axes = plt.subplots(len(rows), len(columns), figsize=(28, 10), sharex=True, sharey=True)
 
     for row_idx, (model, model_label) in enumerate(rows):
         for col_idx, (dataset_suffix, dataset_label) in enumerate(columns):
@@ -1111,82 +837,193 @@ def plot_model_comparison_component_comparison_mlp(dfs: dict[str, pd.DataFrame])
             df = dfs.get(dataset)
 
             if row_idx == 0:
-                ax.set_title(dataset_label, fontsize=AX_TITLE_FONTSIZE, fontweight="bold")
+                ax.set_title(
+                    dataset_label,
+                    fontsize=style.get("subplot_title_size", AX_TITLE_FONTSIZE),
+                    fontweight="bold",
+                )
 
             if df is None:
-                ax.text(0.5, 0.5, "Data not available", ha="center", va="center")
+                ax.text(
+                    0.5,
+                    0.5,
+                    data_not_available,
+                    ha="center",
+                    va="center",
+                    fontsize=style.get(
+                        "annotation_font_size",
+                        TICK_LABEL_FONTSIZE,
+                    ),
+                )
                 ax.set_axis_off()
                 continue
 
             subset = df[df["feature_label"].isin(selected_features.keys())].copy()
+
             if subset.empty:
-                ax.text(0.5, 0.5, "Data not available", ha="center", va="center")
+                ax.text(
+                    0.5,
+                    0.5,
+                    data_not_available,
+                    ha="center",
+                    va="center",
+                    fontsize=style.get(
+                        "annotation_font_size",
+                        TICK_LABEL_FONTSIZE,
+                    ),
+                )
                 ax.set_axis_off()
                 continue
 
             subset["Component"] = subset["feature_label"].map(selected_features)
-            subset_sorted = subset.set_index("Component").reindex(components).dropna(subset=[f"{probe_type}_true"])
+
+            subset_sorted = (
+                subset
+                .set_index("Component")
+                .reindex(components)
+                .dropna(subset=[f"{probe_type}_true"])
+            )
+
             current_components = subset_sorted.index.tolist()
 
             no_skill = get_no_skill_brier(dataset)
             if np.isfinite(no_skill):
                 ax.axhspan(0, no_skill, alpha=0.06, color="gray")
-                ax.axhline(no_skill, linestyle="--", linewidth=2, color="black", label="No-skill baseline")
+                ax.axhline(
+                    no_skill,
+                    linestyle="--",
+                    linewidth=2,
+                    color="black",
+                    label=legend_labels.get("no_skill", "No-skill baseline"),
+                )
 
             y_true = subset_sorted[f"{probe_type}_true"].to_numpy()
-            y_shuf = subset_sorted[f"{probe_type}_shuffle"].to_numpy()
-            y_extra = y_shuf - y_true
             x = np.arange(len(current_components))
 
-            ax.bar(x, y_true, color="C0", edgecolor="black", label="Probe (true labels)")
-            if np.isfinite(y_extra).any():
+            ax.bar(
+                x,
+                y_true,
+                width=bar_width,
+                color="C0",
+                edgecolor="black",
+                label=legend_labels.get("probe_true", "Probe (true labels)"),
+            )
+
+            if show_shuffle_control:
+                y_shuf = subset_sorted[f"{probe_type}_shuffle"].to_numpy()
+                y_extra = y_shuf - y_true
+            else:
+                y_extra = np.array([])
+
+            if show_shuffle_control and np.isfinite(y_extra).any():
                 ax.bar(
                     x,
                     y_extra,
+                    width=bar_width,
                     bottom=y_true,
                     hatch="//",
                     alpha=0.6,
                     color="C0",
                     edgecolor="black",
-                    label="Shuffled-label control",
+                    label=legend_labels.get(
+                        "shuffle_control",
+                        "Shuffled-label control",
+                    ),
                 )
 
             ax.set_xticks(x)
-            ax.set_xticklabels(current_components, rotation=45, ha="right", fontsize=TICK_LABEL_FONTSIZE)
-            ax.tick_params(axis="y", labelsize=TICK_LABEL_FONTSIZE)
-            ax.set_ylim(0.00, 0.45)
-            ax.set_yticks(np.arange(0.00, 0.46, 0.05))
+            ax.set_xticklabels(
+                current_components,
+                rotation=45,
+                ha="right",
+                fontsize=style.get("tick_label_size", TICK_LABEL_FONTSIZE),
+            )
+            ax.tick_params(
+                axis="y",
+                labelsize=style.get("tick_label_size", TICK_LABEL_FONTSIZE),
+            )
+
+            # Fixed/configurable y-axis range and tick positions
+            if y_limits is not None:
+                ax.set_ylim(*y_limits)
+
+            if y_ticks is not None:
+                ax.set_yticks(y_ticks)
+                ax.set_yticklabels([f"{tick:.1f}" for tick in y_ticks])
+
+            if group_spacing is not None:
+                ax.margins(x=group_spacing)
+
             ax.grid(axis="y", linestyle="--", alpha=0.6)
 
             if col_idx == 0:
-                ax.set_ylabel(f"{model_label}\nBrier Score", fontsize=AX_LABEL_FONTSIZE)
+                ax.set_ylabel(
+                    y_label_template.format(model_label=model_label),
+                    fontsize=style.get("axis_label_size", AX_LABEL_FONTSIZE),
+                )
 
-            if row_idx == 0:
+            if len(rows) > 1 and row_idx == 0:
                 ax.tick_params(axis="x", labelbottom=False)
+
+    for ax in axes.ravel():
+        if not ax.has_data():
+            ax.set_axis_off()
 
     handles, labels = [], []
     for ax in axes.ravel():
         ax_handles, ax_labels = ax.get_legend_handles_labels()
         handles.extend(ax_handles)
         labels.extend(ax_labels)
+
     by_label = dict(zip(labels, handles))
+
+    legend_columns = min(
+        len(by_label),
+        max(1, int(layout.get("legend_columns", 3))),
+    )
+
     fig.legend(
         by_label.values(),
         by_label.keys(),
         loc="upper center",
-        ncol=3,
-        bbox_to_anchor=(0.5, 0.955),
-        fontsize=LEGEND_FONTSIZE,
+        ncol=legend_columns,
+        bbox_to_anchor=(0.5, layout.get("legend_y_position", 0.955)),
+        title=text.get("legend_title", None),
+        fontsize=style.get("legend_font_size", LEGEND_FONTSIZE),
+        title_fontsize=style.get("legend_title_size", LEGEND_FONTSIZE),
     )
 
-    plt.suptitle("Component Comparison - MLP Probe", fontsize=COMBINED_FIG_TITLE_FONTSIZE, y=1.03)
+    plt.suptitle(
+        figure_title,
+        fontsize=style.get(
+            "figure_title_size",
+            COMBINED_FIG_TITLE_FONTSIZE,
+        ),
+        y=1.03,
+    )
+
     plt.tight_layout(rect=(0, 0, 1, 0.925))
+
+    if wspace is not None or hspace is not None:
+        fig.subplots_adjust(wspace=wspace, hspace=hspace)
 
     outdir = OUTDIR / "all_models_all_datasets"
     outdir.mkdir(parents=True, exist_ok=True)
-    outpath = outdir / "model_comparison_component_comparison_mlp.pdf"
-    fig.savefig(outpath, format="pdf", bbox_inches="tight")
-    fig.savefig(outpath.with_suffix(".png"), format="png", bbox_inches="tight", dpi=300)
+
+    outpath = outdir / f"{output_name}.pdf"
+
+    fig.savefig(
+        outpath,
+        format="pdf",
+        bbox_inches="tight",
+    )
+    fig.savefig(
+        outpath.with_suffix(".png"),
+        format="png",
+        bbox_inches="tight",
+        dpi=300,
+    )
+
     plt.close(fig)
     print(f"[saved] {outpath} (+ png)")
 

@@ -1,0 +1,28 @@
+#!/bin/bash
+
+#SBATCH --partition=rome
+#SBATCH --job-name=pope_grad_obj_plots
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --time=01:00:00
+#SBATCH --output=slurm_outputs/patching/llava/pope/plot_gradient_guided_objectives_%j.out
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+cd "$HOME/vlm_uncertainty/" || exit 1
+source activate llava-experiments
+
+export VLM_UQ_STORAGE_ROOT="${VLM_UQ_STORAGE_ROOT:-/projects/prjs2014}"
+export MPLCONFIGDIR="${TMPDIR:-/tmp}/matplotlib-$SLURM_JOB_ID"
+mkdir -p "$MPLCONFIGDIR" slurm_outputs/patching/llava/pope
+
+ROOT="$VLM_UQ_STORAGE_ROOT/patching/gradient_guided_token_patching/llava-hf_llava-1-5-7b-hf/pope/random"
+OUTPUT_DIR="$ROOT/objective_contribution_summary"
+
+python -u scripts/plot_gradient_guided_objective_contributions.py \
+  --root "$ROOT" \
+  --sample_ids 795 791 1941 2273 1309 1269 2347 25 429 161 \
+  --objectives maximize_p_yes maximize_p_no \
+  --output_dir "$OUTPUT_DIR"

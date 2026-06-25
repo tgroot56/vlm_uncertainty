@@ -62,6 +62,7 @@ class LayerSweepConfig:
     n_prompt_tokens: int = 3       # how many final prompt tokens to patch
     severity: str = "moderate"     # "mild", "moderate", "severe", or "all"
     max_new_tokens: int = 4
+    max_new_tokens_override: Optional[int] = None
     checkpoint_every: int = 10
     verbose: bool = False
     # "final" (default): last ``n_prompt_tokens`` non-visual prompt tokens.
@@ -358,7 +359,11 @@ def run_layer_sweep_patching(
          image with one token's activation replaced at one layer.
     """
     os.makedirs(output_dir, exist_ok=True)
-    max_new_tokens = _MAX_NEW_TOKENS.get(cfg.dataset_id, cfg.max_new_tokens)
+    max_new_tokens = (
+        cfg.max_new_tokens_override
+        if cfg.max_new_tokens_override is not None
+        else _MAX_NEW_TOKENS.get(cfg.dataset_id, cfg.max_new_tokens)
+    )
 
     severities = (
         ["mild", "moderate", "severe", "extreme"] if cfg.severity == "all"
@@ -398,6 +403,7 @@ def run_layer_sweep_patching(
     print(f"  Samples:          {total}")
     print(f"  Final positions:  {cfg.n_prompt_tokens}")
     print(f"  Severities:       {severities}")
+    print(f"  Max new tokens:   {max_new_tokens}")
     print(f"  Qwen prefill:     {cfg.qwen_prefill_empty_thinking}")
     print(f"  Clean answer P:   {cfg.save_clean_answer_probability}")
     print(
@@ -659,6 +665,7 @@ def run_layer_sweep_patching(
     from src.cli.plot_sweep_filtered import (
         plot_layer_sweep_combined,
         plot_pope_clean_answer_layer_sweep,
+        plot_two_metrics_cross_model_layer_sweep,
     )
 
     parquet_path = os.path.join(output_dir, "layer_sweep_results.parquet")
@@ -666,6 +673,29 @@ def run_layer_sweep_patching(
         plot_layer_sweep_combined(parquet_path, _Path(output_dir), raw=False)
         plot_layer_sweep_combined(parquet_path, _Path(output_dir), raw=True)
         plot_layer_sweep_combined(parquet_path, _Path(output_dir), raw=True, min_delta=0.0)
+        if cfg.save_clean_answer_probability:
+            model_label = (
+                "Qwen3.5-9B" if vlm_adapter.family == "qwen" else "LLaVA-1.5-7B"
+            )
+            plot_two_metrics_cross_model_layer_sweep(
+                model_entries=[(model_label, {cfg.dataset_id: parquet_path})],
+                datasets=[cfg.dataset_id],
+                output_dir=_Path(output_dir),
+                output_name=(
+                    "layer_sweep_expressed_clean_answer_confidence_"
+                    "accuracy_recovery"
+                ),
+                min_delta=0.0,
+                metrics=[
+                    "top1_probability",
+                    "clean_answer_probability",
+                    "score",
+                ],
+                title=(
+                    "Layer Sweep - Expressed Confidence, "
+                    "Clean-Answer Confidence & Accuracy Recovery"
+                ),
+            )
         if cfg.dataset_id == "pope":
             plot_pope_clean_answer_layer_sweep(parquet_path, _Path(output_dir))
     except Exception as e:

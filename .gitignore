@@ -15,8 +15,12 @@ build/
 # Results and outputs
 results/
 slurm_outputs/
+thesis_plot_notebook_data/
+thesis_plot_outputs/
+.matplotlib_cache/
 *.pkl
 *.json
+*.ipynb
 # Ignore everything inside probe_results
 probe_results/**
 
